@@ -12,6 +12,16 @@ from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import QTextCursor
 
+# [시스템 권한 승인 함수]
+def is_admin():
+    try: return ctypes.windll.shell32.IsUserAnAdmin()
+    except: return False
+
+# 관리자 권한이 아니면 다시 실행
+if not is_admin():
+    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+    sys.exit()
+
 # [기본 설정]
 PROC_NAME = "aion.bin"
 MOD_NAME = "Game.dll"
@@ -26,13 +36,14 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config_settings.json")
 BASE_CALC_1 = 0x15D9BB4 - 0x613104 - 0xB6400 - 0x1       
 ADDR_TRIGGER = 0x15D9BB4 + 0x14EE4C - 0x10
 
-# 오프셋 경로
 ATTACK_MOTION_PATH = [0x58, 0x10, 0x28, 0x388, 0x5AA]    
 MOVE_SPEED_PATH = [0x58, 0x10, 0x28, 0x388, 0x784]       
 STEALTH_PATH = [0x58, 0x10, 0x28, 0x388, 0x3A0]         
 RADAR_OFF, SELECT_100M_OFF, CHAR_SPEED_OFF = 0xF5, 0xE5, 0x39
 
 kernel32 = ctypes.windll.kernel32
+# 프로세스 메모리 접근 권한 상수
+PROCESS_ALL_ACCESS = 0x1F0FFF
 
 class AionTriggerHelper(QMainWindow):
     log_signal = pyqtSignal(str)
@@ -41,7 +52,7 @@ class AionTriggerHelper(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.check_for_updates() # 업데이트 확인 로직 유지
+        self.check_for_updates() # 업데이트 로직 유지
         
         self.pm, self.base_addr = None, 0
         self.target_pid = None
@@ -69,7 +80,7 @@ class AionTriggerHelper(QMainWindow):
         except: pass
 
     def init_ui(self):
-        self.setWindowTitle("Aion Helper Pro - Fixed Apply")
+        self.setWindowTitle("Aion Helper Pro - Admin Force Write")
         self.setFixedSize(500, 680)
         central_widget = QWidget(); self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
@@ -147,11 +158,13 @@ class AionTriggerHelper(QMainWindow):
                             self.base_addr = mod.lpBaseOfDll; self.is_connected = True
                             self.target_pid = found_pid
                             self.status_signal.emit(f"● 연결됨 (PID: {found_pid})", "#27AE60")
-                    except: self.is_connected = False
+                            self.log_signal.emit("✅ 최고 권한으로 프로세스에 연결되었습니다.")
+                    except Exception as e:
+                        self.log_signal.emit(f"❌ 연결 실패: {e}")
+                        self.is_connected = False
             else:
                 try:
                     if not psutil.pid_exists(self.target_pid): raise Exception()
-                    # 맵 이동 시 get_addr이 실패하면 재연결 시도
                     if not self.execute_logic():
                         self.is_connected = False
                 except:
@@ -162,34 +175,24 @@ class AionTriggerHelper(QMainWindow):
     def execute_logic(self):
         data = {}
         try:
-            # 1. 트리거 값 읽기
             trigger_val = self.pm.read_int(self.base_addr + ADDR_TRIGGER)
             data["트리거 값"] = trigger_val
-
-            # 2. 베이스 포인터 주소 계산 (이 부분이 틀리면 N/A 발생)
             base_ptr = self.get_addr(ATTACK_MOTION_PATH[:-1])
             addr_radar = self.base_addr + BASE_CALC_1 + RADAR_OFF
             addr_char_speed = self.base_addr + BASE_CALC_1 + CHAR_SPEED_OFF
             addr_100m = self.base_addr + BASE_CALC_1 + SELECT_100M_OFF
 
-            # ✅ 트리거 0일 때 강제 쓰기 (이 로직이 실행되어야 적용됨)
             if trigger_val == 0:
-                if self.last_trigger_val != 0: self.log_signal.emit("🟢 트리거 0: ACTIVE")
-                
+                if self.last_trigger_val != 0: self.log_signal.emit("🟢 트리거 0: ACTIVE (강제 쓰기 가동)")
                 if base_ptr:
-                    # 공격 모션 적용
                     self.safe_write(base_ptr + ATTACK_MOTION_PATH[-1], self.controls["공격 모션"]["input"].value(), 'short')
-                    # 이동 속도 적용
                     self.safe_write(base_ptr + MOVE_SPEED_PATH[-1], self.controls["이동 속도"]["input"].value(), 'float')
-                    # 은신/등산 적용
                     s_ptr = self.get_addr(STEALTH_PATH[:-1])
                     if s_ptr: self.safe_write(s_ptr + STEALTH_PATH[-1], 2560.0)
-                
                 self.safe_write(addr_radar, 400211.0)
                 self.safe_write(addr_char_speed, 8.0)
                 self.safe_write(addr_100m, 110.0 if self.check_100m.isChecked() else 50.0)
 
-            # 3. 현재값 읽어서 UI에 표시 (이 값이 설정값과 같아져야 적용된 것임)
             if base_ptr:
                 data["공격 모션"] = self.pm.read_short(base_ptr + ATTACK_MOTION_PATH[-1])
                 data["이동 속도"] = self.pm.read_float(base_ptr + MOVE_SPEED_PATH[-1])
@@ -201,12 +204,10 @@ class AionTriggerHelper(QMainWindow):
             data["레이더"] = self.pm.read_float(addr_radar)
             data["케선 속도"] = self.pm.read_float(addr_char_speed)
             data["100미터 선택"] = self.pm.read_float(addr_100m)
-            
             self.update_ui_signal.emit(data)
             self.last_trigger_val = trigger_val
             return True
-        except:
-            return False
+        except: return False
 
     def get_addr(self, offsets):
         try:
@@ -220,18 +221,19 @@ class AionTriggerHelper(QMainWindow):
         except: return None
 
     def safe_write(self, addr, value, vtype='float'):
-        """메모리 보호를 풀고 값을 쓴 뒤 다시 잠그는 안전한 쓰기 방식"""
+        """컴퓨터 2 환경을 위한 초강력 강제 쓰기 함수"""
         if not self.pm or not addr: return
         try:
             old = ctypes.c_ulong()
-            # 1. PAGE_EXECUTE_READWRITE (0x40) 권한 부여
-            if kernel32.VirtualProtectEx(self.pm.process_handle, addr, 4, 0x40, ctypes.byref(old)):
+            # 1. PAGE_EXECUTE_READWRITE 권한 강제 부여 (0x40)
+            if kernel32.VirtualProtectEx(self.pm.process_handle, addr, 8, 0x40, ctypes.byref(old)):
                 if vtype == 'float': self.pm.write_float(addr, float(value))
                 elif vtype == 'short': self.pm.write_short(addr, int(value))
                 elif vtype == 'int': self.pm.write_int(addr, int(value))
-                # 2. 원래 권한으로 복구
-                kernel32.VirtualProtectEx(self.pm.process_handle, addr, 4, old, ctypes.byref(old))
-        except: pass
+                # 2. 값 주입 후 즉시 다시 권한 복구 (안전성)
+                kernel32.VirtualProtectEx(self.pm.process_handle, addr, 8, old, ctypes.byref(old))
+        except Exception as e:
+            print(f"Write Fail at {hex(addr)}: {e}")
 
     def save_settings(self):
         try:
