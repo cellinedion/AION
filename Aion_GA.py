@@ -41,8 +41,7 @@ class AionTriggerHelper(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        # ✅ [업데이트 로직 추가] 실행 즉시 GitHub 확인 및 최신화
-        self.check_for_updates() 
+        self.check_for_updates() # 업데이트 확인 로직 유지
         
         self.pm, self.base_addr = None, 0
         self.target_pid = None
@@ -59,47 +58,35 @@ class AionTriggerHelper(QMainWindow):
         
         threading.Thread(target=self.control_loop, daemon=True).start()
 
-    # ✅ 누락되었던 업데이트 로직 함수
     def check_for_updates(self):
-        """GitHub 리포지토리 상태를 확인하고 업데이트 시 자동 재시작"""
         try:
-            # git fetch를 통해 원격 저장소 정보 갱신
             subprocess.run(["git", "fetch"], cwd=BASE_DIR, capture_output=True, check=True)
-            # 현재 상태 확인
             status = subprocess.run(["git", "status", "-uno"], cwd=BASE_DIR, capture_output=True, text=True).stdout
-            
             if "Your branch is behind" in status:
-                print("✨ 새로운 업데이트를 발견했습니다. Pull 시작...")
                 subprocess.run(["git", "pull", "origin", "main"], cwd=BASE_DIR, check=True)
-                # 업데이트 성공 시 프로그램 즉시 재시작
                 python = sys.executable
                 os.execv(python, [python] + sys.argv)
-        except Exception as e:
-            print(f"업데이트 확인 건너뜀 (Git 미설치 혹은 Repo 아님): {e}")
+        except: pass
 
     def init_ui(self):
-        self.setWindowTitle("Aion Helper Pro")
+        self.setWindowTitle("Aion Helper Pro - Fixed Apply")
         self.setFixedSize(500, 680)
         central_widget = QWidget(); self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # 1. 대상 프로세스 선택 (상단 배치)
         self.btn_select = QPushButton("🎮 대상 프로세스 수동 선택")
         self.btn_select.setMinimumHeight(45)
         self.btn_select.setStyleSheet("font-weight: bold; background-color: #EBF5FB; border: 1px solid #AED6F1;")
         self.btn_select.clicked.connect(self.select_process)
         main_layout.addWidget(self.btn_select)
 
-        # 2. 설정 저장 (소형 버튼)
         save_layout = QHBoxLayout()
         self.btn_save = QPushButton("💾 설정 저장")
         self.btn_save.setFixedSize(120, 30)
-        self.btn_save.setStyleSheet("font-size: 11px;")
         self.btn_save.clicked.connect(self.save_settings)
         save_layout.addStretch(); save_layout.addWidget(self.btn_save); save_layout.addStretch()
         main_layout.addLayout(save_layout)
 
-        # 3. 메인 모니터링 박스
         guide_box = QGroupBox("📊 실시간 모니터링 및 자동 제어")
         guide_layout = QGridLayout(); self.controls = {}
 
@@ -107,7 +94,6 @@ class AionTriggerHelper(QMainWindow):
         for row, (name, dtype) in enumerate(items, 1):
             guide_layout.addWidget(QLabel(name), row, 0)
             cur_view = QLineEdit(); cur_view.setReadOnly(True); cur_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            cur_view.setText("N/A")
             cur_view.setStyleSheet("background-color: #EBEDEF; font-weight: bold;")
             guide_layout.addWidget(cur_view, row, 1)
             inp = QSpinBox() if dtype == "int" else QDoubleSpinBox()
@@ -120,7 +106,6 @@ class AionTriggerHelper(QMainWindow):
         for row_m, name in enumerate(mon_items, 3):
             guide_layout.addWidget(QLabel(name), row_m, 0)
             cur_view = QLineEdit(); cur_view.setReadOnly(True); cur_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            cur_view.setText("N/A")
             cur_view.setStyleSheet("background-color: #F4F6F7; font-weight: bold; color: #2E86C1;")
             guide_layout.addWidget(cur_view, row_m, 1)
             if name == "100미터 선택":
@@ -165,38 +150,38 @@ class AionTriggerHelper(QMainWindow):
                     except: self.is_connected = False
             else:
                 try:
-                    if not psutil.pid_exists(self.pm.process_id): raise Exception()
-                    # ✅ 로직 실행 결과가 False면 맵 이동으로 판단하여 재연결 유도
+                    if not psutil.pid_exists(self.target_pid): raise Exception()
+                    # 맵 이동 시 get_addr이 실패하면 재연결 시도
                     if not self.execute_logic():
-                        self.is_connected = False 
+                        self.is_connected = False
                 except:
-                    self.is_connected = False; self.pm = None; self.target_pid = None
-                    self.status_signal.emit("○ 연결 끊김", "#C0392B")
+                    self.is_connected = False; self.pm = None
+                    self.status_signal.emit("○ 연결 끊김 (재검색)", "#C0392B")
             time.sleep(1.0)
 
     def execute_logic(self):
         data = {}
         try:
-            # 1. 트리거 주소 읽기
-            try:
-                trigger_val = self.pm.read_int(self.base_addr + ADDR_TRIGGER)
-                data["트리거 값"] = trigger_val
-            except: 
-                data["트리거 값"] = "Error"
-                return False # 읽기 실패 시 재연결 트리거
+            # 1. 트리거 값 읽기
+            trigger_val = self.pm.read_int(self.base_addr + ADDR_TRIGGER)
+            data["트리거 값"] = trigger_val
 
-            # 2. 주소 계산
+            # 2. 베이스 포인터 주소 계산 (이 부분이 틀리면 N/A 발생)
             base_ptr = self.get_addr(ATTACK_MOTION_PATH[:-1])
             addr_radar = self.base_addr + BASE_CALC_1 + RADAR_OFF
             addr_char_speed = self.base_addr + BASE_CALC_1 + CHAR_SPEED_OFF
             addr_100m = self.base_addr + BASE_CALC_1 + SELECT_100M_OFF
 
-            # 트리거 0일 때 쓰기 로직
+            # ✅ 트리거 0일 때 강제 쓰기 (이 로직이 실행되어야 적용됨)
             if trigger_val == 0:
                 if self.last_trigger_val != 0: self.log_signal.emit("🟢 트리거 0: ACTIVE")
+                
                 if base_ptr:
+                    # 공격 모션 적용
                     self.safe_write(base_ptr + ATTACK_MOTION_PATH[-1], self.controls["공격 모션"]["input"].value(), 'short')
+                    # 이동 속도 적용
                     self.safe_write(base_ptr + MOVE_SPEED_PATH[-1], self.controls["이동 속도"]["input"].value(), 'float')
+                    # 은신/등산 적용
                     s_ptr = self.get_addr(STEALTH_PATH[:-1])
                     if s_ptr: self.safe_write(s_ptr + STEALTH_PATH[-1], 2560.0)
                 
@@ -204,30 +189,19 @@ class AionTriggerHelper(QMainWindow):
                 self.safe_write(addr_char_speed, 8.0)
                 self.safe_write(addr_100m, 110.0 if self.check_100m.isChecked() else 50.0)
 
-            # 3. UI 데이터 수집 및 N/A 처리
+            # 3. 현재값 읽어서 UI에 표시 (이 값이 설정값과 같아져야 적용된 것임)
             if base_ptr:
-                try: data["공격 모션"] = self.pm.read_short(base_ptr + ATTACK_MOTION_PATH[-1])
-                except: data["공격 모션"] = "Read Err"
-                try: data["이동 속도"] = self.pm.read_float(base_ptr + MOVE_SPEED_PATH[-1])
-                except: data["이동 속도"] = "Read Err"
+                data["공격 모션"] = self.pm.read_short(base_ptr + ATTACK_MOTION_PATH[-1])
+                data["이동 속도"] = self.pm.read_float(base_ptr + MOVE_SPEED_PATH[-1])
+                s_ptr = self.get_addr(STEALTH_PATH[:-1])
+                if s_ptr: data["은신 활성화"] = self.pm.read_float(s_ptr + STEALTH_PATH[-1])
             else:
-                data["공격 모션"] = "N/A"
-                data["이동 속도"] = "N/A"
+                data["공격 모션"] = "N/A"; data["이동 속도"] = "N/A"; data["은신 활성화"] = "N/A"
 
-            s_ptr = self.get_addr(STEALTH_PATH[:-1])
-            if s_ptr:
-                try: data["은신 활성화"] = self.pm.read_float(s_ptr + STEALTH_PATH[-1])
-                except: data["은신 활성화"] = "Read Err"
-            else:
-                data["은신 활성화"] = "N/A"
-
-            try: data["레이더"] = self.pm.read_float(addr_radar)
-            except: data["레이더"] = "Error"
-            try: data["케선 속도"] = self.pm.read_float(addr_char_speed)
-            except: data["케선 속도"] = "Error"
-            try: data["100미터 선택"] = self.pm.read_float(addr_100m)
-            except: data["100미터 선택"] = "Error"
-
+            data["레이더"] = self.pm.read_float(addr_radar)
+            data["케선 속도"] = self.pm.read_float(addr_char_speed)
+            data["100미터 선택"] = self.pm.read_float(addr_100m)
+            
             self.update_ui_signal.emit(data)
             self.last_trigger_val = trigger_val
             return True
@@ -246,12 +220,16 @@ class AionTriggerHelper(QMainWindow):
         except: return None
 
     def safe_write(self, addr, value, vtype='float'):
+        """메모리 보호를 풀고 값을 쓴 뒤 다시 잠그는 안전한 쓰기 방식"""
         if not self.pm or not addr: return
         try:
             old = ctypes.c_ulong()
+            # 1. PAGE_EXECUTE_READWRITE (0x40) 권한 부여
             if kernel32.VirtualProtectEx(self.pm.process_handle, addr, 4, 0x40, ctypes.byref(old)):
                 if vtype == 'float': self.pm.write_float(addr, float(value))
                 elif vtype == 'short': self.pm.write_short(addr, int(value))
+                elif vtype == 'int': self.pm.write_int(addr, int(value))
+                # 2. 원래 권한으로 복구
                 kernel32.VirtualProtectEx(self.pm.process_handle, addr, 4, old, ctypes.byref(old))
         except: pass
 
@@ -278,9 +256,6 @@ class AionTriggerHelper(QMainWindow):
             if name in self.controls:
                 text = str(val) if isinstance(val, (int, str)) else f"{val:.2f}"
                 self.controls[name]["view"].setText(text)
-        if "100미터 선택" in data:
-            val = data["100미터 선택"]
-            self.controls["100미터 선택"]["view"].setText(f"{val:.2f}" if isinstance(val, float) else str(val))
 
     @pyqtSlot(str, str)
     def update_status_ui(self, t, c):
