@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import QTextCursor
 
-# [관리자 권한 요청] - 실시간 쓰기를 위해 필수
+# [관리자 권한 확인 및 자동 요청]
 def is_admin():
     try: return ctypes.windll.shell32.IsUserAnAdmin()
     except: return False
@@ -33,6 +33,7 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config_settings.json")
 BASE_CALC_1 = 0x15D9BB4 - 0x613104 - 0xB6400 - 0x1       
 ADDR_TRIGGER = 0x15D9BB4 + 0x14EE4C - 0x10
 
+# 오프셋 경로
 ATTACK_MOTION_PATH = [0x58, 0x10, 0x28, 0x388, 0x5AA]    
 MOVE_SPEED_PATH = [0x58, 0x10, 0x28, 0x388, 0x784]       
 STEALTH_PATH = [0x58, 0x10, 0x28, 0x388, 0x3A0]         
@@ -48,10 +49,12 @@ class AionTriggerHelper(QMainWindow):
     def __init__(self):
         super().__init__()
         self.check_for_updates()
+        
         self.pm, self.base_addr = None, 0
         self.target_pid = None
         self.is_connected = False
         self.is_64bit = True
+        self.last_trigger_val = -1
         
         self.init_ui()
         self.load_settings()
@@ -60,7 +63,7 @@ class AionTriggerHelper(QMainWindow):
         self.status_signal.connect(self.update_status_ui)
         self.update_ui_signal.connect(self.sync_ui)
         
-        # 0.1초 단위의 매우 빠른 실시간 제어를 위해 별도 스레드 운영
+        # 0.1초 단위의 빠른 루프로 실시간 제어 및 자동 재연결 수행
         threading.Thread(target=self.control_loop, daemon=True).start()
 
     def check_for_updates(self):
@@ -74,7 +77,7 @@ class AionTriggerHelper(QMainWindow):
         except: pass
 
     def init_ui(self):
-        self.setWindowTitle("Aion Helper - Realtime Force Write")
+        self.setWindowTitle("Aion Helper - Auto Sync Edition")
         self.setFixedSize(500, 680)
         central_widget = QWidget(); self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
@@ -136,73 +139,80 @@ class AionTriggerHelper(QMainWindow):
         except: pass
 
     def control_loop(self):
-        # UI 업데이트 주기 조절용 카운터
-        ui_tick = 0
+        """맵 이동 시 주소 재탐색을 자동으로 수행하는 루프"""
         while True:
             if not self.is_connected:
-                # 연결 로직 (생략 - 기존 유지)
+                # 1. 프로세스 및 모듈 베이스 다시 찾기 (수동 선택 자동화)
                 found_pid = self.target_pid if self.target_pid and psutil.pid_exists(self.target_pid) else None
                 if not found_pid:
                     for p in psutil.process_iter(['pid', 'name']):
-                        if p.info['name'] and p.info['name'].lower() == PROC_NAME: found_pid = p.info['pid']; break
+                        if p.info['name'] and p.info['name'].lower() == PROC_NAME:
+                            found_pid = p.info['pid']; break
                 if found_pid:
                     try:
                         self.pm = pymem.Pymem(); self.pm.open_process_from_id(found_pid)
                         self.is_64bit = pymem.process.is_64_bit(self.pm.process_handle)
                         mod = pymem.process.module_from_name(self.pm.process_handle, MOD_NAME)
                         if mod:
-                            self.base_addr = mod.lpBaseOfDll; self.is_connected = True
+                            self.base_addr = mod.lpBaseOfDll
+                            self.is_connected = True
+                            self.target_pid = found_pid
                             self.status_signal.emit(f"● 연결됨 (PID: {found_pid})", "#27AE60")
                     except: self.is_connected = False
                 time.sleep(1.0)
             else:
                 try:
-                    # 실시간 쓰기 권한 작동 및 로직 실행
-                    self.execute_logic()
+                    # 2. 로직 실행 (실패 시 즉시 is_connected = False로 만들어 주소 재탐색 유도)
+                    if not self.execute_logic():
+                        self.is_connected = False 
                 except:
-                    self.is_connected = False; self.pm = None
-                    self.status_signal.emit("○ 연결 끊김 (재검색)", "#C0392B")
-                # 실시간성을 위해 대기 시간을 0.1초로 단축
+                    self.is_connected = False
                 time.sleep(0.1)
 
     def execute_logic(self):
+        """실시간 쓰기 및 데이터 읽기. 맵 이동 시 False를 반환하여 재연결 트리거"""
+        data = {}
         try:
+            # 베이스 주소가 유효한지 체크
             trigger_val = self.pm.read_int(self.base_addr + ADDR_TRIGGER)
+            data["트리거 값"] = trigger_val
+
             base_ptr = self.get_addr(ATTACK_MOTION_PATH[:-1])
             addr_radar = self.base_addr + BASE_CALC_1 + RADAR_OFF
             addr_char_speed = self.base_addr + BASE_CALC_1 + CHAR_SPEED_OFF
             addr_100m = self.base_addr + BASE_CALC_1 + SELECT_100M_OFF
 
-            # ✅ [실시간 강제 고정] 트리거가 0이면 0.1초마다 계속 덮어씀
+            # 맵 이동 직후 포인터가 깨진 상태면 재동기화 필요
+            if not base_ptr: return False
+
+            # [실시간 강제 쓰기] 트리거 0인 동안 0.1초마다 계속 덮어씀
             if trigger_val == 0:
-                if base_ptr:
-                    # 공격 모션/이동 속도 실시간 쓰기 권한 부여 및 고정
-                    self.safe_write(base_ptr + ATTACK_MOTION_PATH[-1], self.controls["공격 모션"]["input"].value(), 'short')
-                    self.safe_write(base_ptr + MOVE_SPEED_PATH[-1], self.controls["이동 속도"]["input"].value(), 'float')
-                    s_ptr = self.get_addr(STEALTH_PATH[:-1])
-                    if s_ptr: self.safe_write(s_ptr + STEALTH_PATH[-1], 2560.0)
+                self.safe_write(base_ptr + ATTACK_MOTION_PATH[-1], self.controls["공격 모션"]["input"].value(), 'short')
+                self.safe_write(base_ptr + MOVE_SPEED_PATH[-1], self.controls["이동 속도"]["input"].value(), 'float')
+                s_ptr = self.get_addr(STEALTH_PATH[:-1])
+                if s_ptr: self.safe_write(s_ptr + STEALTH_PATH[-1], 2560.0)
                 
-                # 고정 주소 계열 실시간 고정
                 self.safe_write(addr_radar, 400211.0)
                 self.safe_write(addr_char_speed, 8.0)
                 self.safe_write(addr_100m, 110.0 if self.check_100m.isChecked() else 50.0)
 
-            # UI 데이터 수집 (매 루프마다 UI를 그리면 무거우므로 데이터만 구성)
-            data = {"트리거 값": trigger_val}
-            if base_ptr:
-                data["공격 모션"] = self.pm.read_short(base_ptr + ATTACK_MOTION_PATH[-1])
-                data["이동 속도"] = self.pm.read_float(base_ptr + MOVE_SPEED_PATH[-1])
-                s_ptr = self.get_addr(STEALTH_PATH[:-1])
-                if s_ptr: data["은신 활성화"] = self.pm.read_float(s_ptr + STEALTH_PATH[-1])
-            else: data["공격 모션"] = data["이동 속도"] = "N/A"
+            # 모니터링 데이터 수집
+            data["공격 모션"] = self.pm.read_short(base_ptr + ATTACK_MOTION_PATH[-1])
+            data["이동 속도"] = self.pm.read_float(base_ptr + MOVE_SPEED_PATH[-1])
+            s_ptr = self.get_addr(STEALTH_PATH[:-1])
+            if s_ptr: data["은신 활성화"] = self.pm.read_float(s_ptr + STEALTH_PATH[-1])
+            else: data["은신 활성화"] = "N/A"
 
             data["레이더"] = self.pm.read_float(addr_radar)
             data["케선 속도"] = self.pm.read_float(addr_char_speed)
             data["100미터 선택"] = self.pm.read_float(addr_100m)
             
             self.update_ui_signal.emit(data)
+            self.last_trigger_val = trigger_val
             return True
-        except: return False
+        except:
+            # 맵 이동 시 위 read 과정에서 에러가 발생하면 재연결 루프로 보냄
+            return False
 
     def get_addr(self, offsets):
         try:
@@ -216,22 +226,18 @@ class AionTriggerHelper(QMainWindow):
         except: return None
 
     def safe_write(self, addr, value, vtype='float'):
-        """실시간 쓰기 권한 부여 최적화 함수"""
         if not self.pm or not addr: return
         try:
             target_addr = int(addr)
             size = 4 if vtype in ['float', 'int'] else 2
             old = ctypes.c_ulong()
-            # 0x40 권한(실시간 쓰기 가능)을 부여하고 값 주입
             if kernel32.VirtualProtectEx(self.pm.process_handle, target_addr, size, 0x40, ctypes.byref(old)):
                 if vtype == 'float': self.pm.write_float(target_addr, float(value))
                 elif vtype == 'short': self.pm.write_short(target_addr, int(value))
                 elif vtype == 'int': self.pm.write_int(target_addr, int(value))
-                # 바로 다시 보호하지 않고 0.1초 뒤 루프에서 다시 처리하므로 안정적임
                 kernel32.VirtualProtectEx(self.pm.process_handle, target_addr, size, old, ctypes.byref(old))
         except: pass
 
-    # --- 나머지 save_settings, load_settings, sync_ui 등은 기존과 동일 ---
     def save_settings(self):
         try:
             config = {"attack_motion": self.controls["공격 모션"]["input"].value(), "move_speed": self.controls["이동 속도"]["input"].value(), "check_100m": self.check_100m.isChecked()}
