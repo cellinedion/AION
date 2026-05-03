@@ -39,11 +39,11 @@ if not is_admin():
 
 set_debug_privilege()
 
-# [2. 메모리 및 프로세스 설정 상수 - 100% 복구]
+# [2. 메모리 및 프로세스 설정 상수]
 PAGE_EXECUTE_READWRITE = 0x40 
 PROC_NAME = "aion.bin"
 MOD_NAME = "Game.dll"
-POINTER_BASE = 0x010AF5C8 
+POINTER_BASE = 0x010AF5C8 # 고정 베이스 주소
 
 if getattr(sys, 'frozen', False): BASE_DIR = os.path.dirname(sys.executable)
 else: BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -52,8 +52,10 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config_settings.json")
 BASE_CALC_1 = 0x15D9BB4 - 0x613104 - 0xB6400 - 0x1       
 ADDR_TRIGGER = 0x15D9BB4 + 0x14EE4C - 0x10
 
+# [수정] 요청하신 메모리 오프셋 경로 적용
 ATTACK_MOTION_PATH = [0x58, 0x10, 0x28, 0x388, 0x5AA]    
 MOVE_SPEED_PATH = [0x58, 0x10, 0x28, 0x388, 0x784]       
+
 STEALTH_PATH = [0x58, 0x10, 0x28, 0x388, 0x3A0]          
 RADAR_OFF, SELECT_100M_OFF, CHAR_SPEED_OFF = 0xF5, 0xE5, 0x39
 
@@ -86,20 +88,16 @@ class AionTriggerHelper(QMainWindow):
         self.update_ui_signal.connect(self.sync_ui)
         self.f11_pressed_signal.connect(self.reset_transparency)
         
-        # 기본 제어 루프
         threading.Thread(target=self.control_loop, daemon=True).start()
-        # [추가] 2초 주기 강제 주입 전 전 전 전 루프
         threading.Thread(target=self.freeze_loop, daemon=True).start()
-        # F11 백그라운드 감시
         threading.Thread(target=self.background_key_monitor, daemon=True).start()
 
-        # 마우스 위치 감시 타이머 (슬라이더 영역 보호용)
         self.mouse_timer = QTimer(self)
         self.mouse_timer.timeout.connect(self.check_mouse_position)
         self.mouse_timer.start(50)
 
     def init_ui(self):
-        self.setWindowTitle("Aion Helper - 2s Force Sync Pro")
+        self.setWindowTitle("Aion Helper - Offset Fixed Pro")
         self.resize(550, 920)
         self.setMinimumSize(320, 500)
         
@@ -107,7 +105,6 @@ class AionTriggerHelper(QMainWindow):
         layout = QVBoxLayout(central_widget)
         layout.setContentsMargins(7, 7, 7, 7)
 
-        # 상단 바
         top_bar = QHBoxLayout()
         self.btn_select = QPushButton("🎮 프로세스 수동 선택"); self.btn_select.setMinimumHeight(45)
         self.btn_select.setStyleSheet("font-weight: bold; background-color: #EBF5FB;")
@@ -117,7 +114,6 @@ class AionTriggerHelper(QMainWindow):
         top_bar.addWidget(self.btn_select, 7); top_bar.addWidget(self.chk_ontop, 3)
         layout.addLayout(top_bar)
 
-        # 모니터링 및 주입 설정
         mon_box = QGroupBox("📊 실시간 데이터 (Z축 4바이트 정수)")
         mon_layout = QGridLayout(); self.controls = {}
         
@@ -153,8 +149,7 @@ class AionTriggerHelper(QMainWindow):
         
         mon_box.setLayout(mon_layout); layout.addWidget(mon_box)
 
-        # 투명도 조절
-        self.trans_box = QGroupBox("🌓 투명도 설정 (슬라이더 항시 조작 가능)")
+        self.trans_box = QGroupBox("🌓 투명도 설정 (슬라이더 영역 항시 조작)")
         trans_layout = QVBoxLayout()
         self.slider_alpha = QSlider(Qt.Orientation.Horizontal)
         self.slider_alpha.setRange(30, 255); self.slider_alpha.setValue(255)
@@ -169,7 +164,7 @@ class AionTriggerHelper(QMainWindow):
         self.status_info = QLabel("상태: 대기 중..."); self.status_info.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(self.status_info)
         self.log_box = QTextEdit(); self.log_box.setReadOnly(True); self.log_box.setStyleSheet("font-size: 10px;"); layout.addWidget(self.log_box)
 
-    # [핵심] 2초마다 강제 체크박스 항목 쓰기/읽기 수행
+    # [핵심] 2초 주기 강제 쓰기 및 읽기 로직
     def freeze_loop(self):
         while True:
             if self.is_connected and self.pm:
@@ -181,13 +176,12 @@ class AionTriggerHelper(QMainWindow):
                             addr = self.get_direct_addr(path)
                             if addr:
                                 vtype = 'short' if name == "공격 모션" else 'float'
-                                # 1. 쓰기
+                                # 1. 메모리 쓰기
                                 self.force_write_rwx(addr, val, vtype)
-                                # 2. 즉시 다시 읽어서 UI에 확인 (읽기)
+                                # 2. 메모리 읽기 (동기화 확인)
                                 current_val = self.pm.read_short(addr) if vtype == 'short' else self.pm.read_float(addr)
-                                self.log_signal.emit(f"🔄 [2초 강제동기화] {name}: {current_val}")
-                except:
-                    pass
+                                # 로그에 찍히는 값은 실시간 UI sync_ui에서 갱신됨
+                except: pass
             time.sleep(2.0)
 
     def on_slider_pressed(self): self.is_dragging = True; self.set_click_through(False)
@@ -250,7 +244,7 @@ class AionTriggerHelper(QMainWindow):
                 try: 
                     if not self.execute_logic(): self.is_connected = False
                 except: self.is_connected = False
-                time.sleep(0.1) # 기본 루프는 0.1초
+                time.sleep(0.1)
 
     def execute_logic(self):
         try:
@@ -259,7 +253,6 @@ class AionTriggerHelper(QMainWindow):
             addr_s = self.get_direct_addr(MOVE_SPEED_PATH)
             if not addr_m or not addr_s: return False 
 
-            # 트리거 0일 때 (자동 모드) 주입 로직
             if trigger == 0:
                 self.force_write_rwx(addr_m, self.controls["공격 모션"]["input"].value(), 'short')
                 self.force_write_rwx(addr_s, self.controls["이동 속도"]["input"].value(), 'float')
@@ -270,7 +263,6 @@ class AionTriggerHelper(QMainWindow):
                 m100_val = 110.0 if self.check_100m.isChecked() else 50.0
                 self.force_write_rwx(self.base_addr + BASE_CALC_1 + SELECT_100M_OFF, m100_val, 'float')
 
-            # 모니터링 데이터 갱신
             data = {
                 "트리거 값": trigger, 
                 "공격 모션": self.pm.read_short(addr_m), 
@@ -289,7 +281,7 @@ class AionTriggerHelper(QMainWindow):
 
     def get_direct_addr(self, p):
         try:
-            addr = self.pm.read_longlong(self.base_addr + POINTER_BASE)
+            addr = self.pm.read_longlong(self.base_addr + POINTER_BASE) # 0x010AF5C8
             for i in range(len(p)-1):
                 addr = self.pm.read_longlong(addr + p[i])
                 if addr == 0: return None
@@ -309,7 +301,7 @@ class AionTriggerHelper(QMainWindow):
         cfg = {"attack": self.controls["공격 모션"]["input"].value(), "speed": self.controls["이동 속도"]["input"].value(), 
                "motion_freeze": self.controls["공격 모션"]["freeze"].isChecked(), "speed_freeze": self.controls["이동 속도"]["freeze"].isChecked(),
                "check_100m": self.check_100m.isChecked(), "alpha": self.slider_alpha.value()}
-        with open(CONFIG_PATH, "w") as f: json.dump(cfg, f); self.append_log("💾 설정 및 주입 상태 저장됨")
+        with open(CONFIG_PATH, "w") as f: json.dump(cfg, f); self.append_log("💾 설정 저장됨")
 
     def load_settings(self):
         if os.path.exists(CONFIG_PATH):
