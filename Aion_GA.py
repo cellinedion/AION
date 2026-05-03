@@ -12,7 +12,22 @@ from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import QTextCursor
 
-# [관리자 권한 확인 및 자동 요청]
+# [1. 윈도우 보안 및 권한 설정]
+kernel32 = ctypes.windll.kernel32
+advapi32 = ctypes.windll.advapi32
+
+def set_debug_privilege():
+    h_token = ctypes.c_void_p()
+    if advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0020 | 0x0008, ctypes.byref(h_token)):
+        luid = ctypes.create_string_buffer(8)
+        if advapi32.LookupPrivilegeValueW(None, "SeDebugPrivilege", luid):
+            tp = ctypes.create_string_buffer(16)
+            ctypes.memmove(tp, b'\x01\x00\x00\x00', 4)
+            ctypes.memmove(ctypes.addressof(tp)+4, luid, 8)
+            ctypes.memmove(ctypes.addressof(tp)+12, b'\x02\x00\x00\x00', 4)
+            advapi32.AdjustTokenPrivileges(h_token, False, tp, 0, None, None)
+        kernel32.CloseHandle(h_token)
+
 def is_admin():
     try: return ctypes.windll.shell32.IsUserAnAdmin()
     except: return False
@@ -21,7 +36,10 @@ if not is_admin():
     ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
     sys.exit()
 
-# [기본 설정]
+set_debug_privilege()
+
+# [2. 메모리 및 프로세스 설정 상수]
+PAGE_EXECUTE_READWRITE = 0x40 
 PROC_NAME = "aion.bin"
 MOD_NAME = "Game.dll"
 POINTER_BASE = 0x010AF5C8 
@@ -33,13 +51,14 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config_settings.json")
 BASE_CALC_1 = 0x15D9BB4 - 0x613104 - 0xB6400 - 0x1       
 ADDR_TRIGGER = 0x15D9BB4 + 0x14EE4C - 0x10
 
-# 오프셋 경로
 ATTACK_MOTION_PATH = [0x58, 0x10, 0x28, 0x388, 0x5AA]    
 MOVE_SPEED_PATH = [0x58, 0x10, 0x28, 0x388, 0x784]       
-STEALTH_PATH = [0x58, 0x10, 0x28, 0x388, 0x3A0]         
+STEALTH_PATH = [0x58, 0x10, 0x28, 0x388, 0x3A0]          
 RADAR_OFF, SELECT_100M_OFF, CHAR_SPEED_OFF = 0xF5, 0xE5, 0x39
 
-kernel32 = ctypes.windll.kernel32
+# Z축 주소 설정
+ADDR_Z_ORIGIN = 0x15C00E8
+Z_CURRENT_PATH = [0x58, 0x10, 0x28, 0x1A0, 0xA8]
 
 class AionTriggerHelper(QMainWindow):
     log_signal = pyqtSignal(str)
@@ -48,13 +67,9 @@ class AionTriggerHelper(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.check_for_updates()
-        
         self.pm, self.base_addr = None, 0
         self.target_pid = None
         self.is_connected = False
-        self.is_64bit = True
-        self.last_trigger_val = -1
         
         self.init_ui()
         self.load_settings()
@@ -63,70 +78,92 @@ class AionTriggerHelper(QMainWindow):
         self.status_signal.connect(self.update_status_ui)
         self.update_ui_signal.connect(self.sync_ui)
         
-        # 0.1초 단위의 빠른 루프로 실시간 제어 및 자동 재연결 수행
         threading.Thread(target=self.control_loop, daemon=True).start()
 
-    def check_for_updates(self):
-        try:
-            subprocess.run(["git", "fetch"], cwd=BASE_DIR, capture_output=True, check=True)
-            status = subprocess.run(["git", "status", "-uno"], cwd=BASE_DIR, capture_output=True, text=True).stdout
-            if "Your branch is behind" in status:
-                subprocess.run(["git", "pull", "origin", "main"], cwd=BASE_DIR, check=True)
-                python = sys.executable
-                os.execv(python, [python] + sys.argv)
-        except: pass
-
     def init_ui(self):
-        self.setWindowTitle("Aion Helper - Auto Sync Edition")
-        self.setFixedSize(500, 680)
+        self.setWindowTitle("Aion Helper - Standalone Pro")
+        self.resize(550, 850)
+        self.setMinimumSize(450, 700)
+        
         central_widget = QWidget(); self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
 
+        top_bar = QHBoxLayout()
         self.btn_select = QPushButton("🎮 대상 프로세스 수동 선택")
-        self.btn_select.setMinimumHeight(45)
-        self.btn_select.setStyleSheet("font-weight: bold; background-color: #EBF5FB; border: 1px solid #AED6F1;")
+        self.btn_select.setMinimumHeight(40)
+        self.btn_select.setStyleSheet("font-weight: bold; background-color: #EBF5FB;")
         self.btn_select.clicked.connect(self.select_process)
-        layout.addWidget(self.btn_select)
+        
+        self.chk_ontop = QCheckBox("항상 위")
+        self.chk_ontop.setChecked(True)
+        self.chk_ontop.toggled.connect(self.toggle_always_on_top)
+        self.toggle_always_on_top(True)
+        
+        top_bar.addWidget(self.btn_select, 7)
+        top_bar.addWidget(self.chk_ontop, 3)
+        layout.addLayout(top_bar)
 
-        save_layout = QHBoxLayout()
-        self.btn_save = QPushButton("💾 설정 저장")
-        self.btn_save.setFixedSize(120, 30)
-        self.btn_save.clicked.connect(self.save_settings)
-        save_layout.addStretch(); save_layout.addWidget(self.btn_save); save_layout.addStretch()
-        layout.addLayout(save_layout)
-
-        mon_box = QGroupBox("📊 실시간 모니터링 및 자동 제어")
+        mon_box = QGroupBox("📊 실시간 데이터 (Z축 4바이트 정수)")
         mon_layout = QGridLayout(); self.controls = {}
 
         items = [("공격 모션", "int"), ("이동 속도", "float")]
         for row, (name, dtype) in enumerate(items, 1):
             mon_layout.addWidget(QLabel(name), row, 0)
-            cur_view = QLineEdit(); cur_view.setReadOnly(True); cur_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            cur_view.setStyleSheet("background-color: #EBEDEF; font-weight: bold;")
+            cur_view = QLineEdit()
+            cur_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cur_view.setStyleSheet("font-weight: bold; color: #E74C3C; background-color: white;")
+            cur_view.returnPressed.connect(lambda n=name: self.direct_manual_inject(n))
             mon_layout.addWidget(cur_view, row, 1)
+            
             inp = QSpinBox() if dtype == "int" else QDoubleSpinBox()
             if dtype == "int": inp.setRange(0, 65535)
             else: inp.setRange(0.0, 100.0); inp.setSingleStep(0.1)
-            inp.setFixedWidth(100); mon_layout.addWidget(inp, row, 2)
-            self.controls[name] = {"view": cur_view, "input": inp}
+            inp.setFixedWidth(80); mon_layout.addWidget(inp, row, 2)
+            
+            chk = QCheckBox("강제 주입")
+            chk.setStyleSheet("color: #C0392B; font-weight: bold;")
+            mon_layout.addWidget(chk, row, 3)
+            self.controls[name] = {"view": cur_view, "input": inp, "freeze": chk, "type": dtype}
 
-        mon_items = ["트리거 값", "은신 활성화", "레이더", "케선 속도", "100미터 선택"]
-        for row_m, name in enumerate(mon_items, 3):
+        # 모니터링 리스트
+        mon_items = [
+            ("트리거 값", "#2E86C1"), 
+            ("은신 활성화", "#2E86C1"), 
+            ("레이더", "#2E86C1"), 
+            ("케선 속도", "#2E86C1"), 
+            ("100미터 선택", "#2E86C1"),
+            ("(z축 기존값)", "#0000FF"), # 파란색
+            ("(z축 현재값)", "#FF0000")  # 빨간색
+        ]
+        
+        for idx, (name, color) in enumerate(mon_items):
+            row_m = idx + 3
             mon_layout.addWidget(QLabel(name), row_m, 0)
             cur_view = QLineEdit(); cur_view.setReadOnly(True); cur_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            cur_view.setStyleSheet("background-color: #F4F6F7; font-weight: bold; color: #2E86C1;")
+            cur_view.setStyleSheet(f"background-color: #F4F6F7; font-weight: bold; color: {color};")
             mon_layout.addWidget(cur_view, row_m, 1)
+            
             if name == "100미터 선택":
-                self.check_100m = QCheckBox("체크:110 / 미체크:50"); mon_layout.addWidget(self.check_100m, row_m, 2)
+                self.check_100m = QCheckBox("110m 고정"); mon_layout.addWidget(self.check_100m, row_m, 2)
             else:
-                mon_layout.addWidget(QLabel("자동 관리"), row_m, 2)
+                mon_layout.addWidget(QLabel("모니터링"), row_m, 2)
             self.controls[name] = {"view": cur_view}
 
         mon_box.setLayout(mon_layout); layout.addWidget(mon_box)
-        self.status_info = QLabel("상태: 프로세스 검색 중..."); self.status_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.btn_save = QPushButton("💾 현재 설정 저장"); self.btn_save.clicked.connect(self.save_settings)
+        layout.addWidget(self.btn_save)
+        
+        self.status_info = QLabel("상태: 연결 대기 중..."); self.status_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.status_info)
+        
         self.log_box = QTextEdit(); self.log_box.setReadOnly(True); self.log_box.setStyleSheet("font-size: 11px;")
         layout.addWidget(self.log_box)
+
+    def toggle_always_on_top(self, state):
+        if state: self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        else: self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
+        self.show()
 
     def select_process(self):
         try:
@@ -138,111 +175,118 @@ class AionTriggerHelper(QMainWindow):
                 self.is_connected = False
         except: pass
 
+    def direct_manual_inject(self, name):
+        if not self.is_connected: return
+        try:
+            val = float(self.controls[name]["view"].text())
+            path = ATTACK_MOTION_PATH if name == "공격 모션" else MOVE_SPEED_PATH
+            vtype = 'short' if name == "공격 모션" else 'float'
+            addr = self.get_direct_addr(path)
+            if addr:
+                self.force_write_rwx(addr, val, vtype)
+                self.append_log(f"⚡ [수동 주입] {name} -> {val} 완료")
+        except Exception as e: self.append_log(f"⚠️ 입력 오류: {e}")
+
     def control_loop(self):
-        """맵 이동 시 주소 재탐색을 자동으로 수행하는 루프"""
         while True:
             if not self.is_connected:
-                # 1. 프로세스 및 모듈 베이스 다시 찾기 (수동 선택 자동화)
                 found_pid = self.target_pid if self.target_pid and psutil.pid_exists(self.target_pid) else None
                 if not found_pid:
                     for p in psutil.process_iter(['pid', 'name']):
-                        if p.info['name'] and p.info['name'].lower() == PROC_NAME:
-                            found_pid = p.info['pid']; break
+                        if p.info['name'] and p.info['name'].lower() == PROC_NAME: found_pid = p.info['pid']; break
                 if found_pid:
                     try:
                         self.pm = pymem.Pymem(); self.pm.open_process_from_id(found_pid)
-                        self.is_64bit = pymem.process.is_64_bit(self.pm.process_handle)
                         mod = pymem.process.module_from_name(self.pm.process_handle, MOD_NAME)
                         if mod:
-                            self.base_addr = mod.lpBaseOfDll
-                            self.is_connected = True
-                            self.target_pid = found_pid
+                            self.base_addr = mod.lpBaseOfDll; self.is_connected = True
                             self.status_signal.emit(f"● 연결됨 (PID: {found_pid})", "#27AE60")
                     except: self.is_connected = False
                 time.sleep(1.0)
             else:
                 try:
-                    # 2. 로직 실행 (실패 시 즉시 is_connected = False로 만들어 주소 재탐색 유도)
-                    if not self.execute_logic():
-                        self.is_connected = False 
-                except:
-                    self.is_connected = False
-                time.sleep(0.1)
+                    if not self.execute_logic(): self.is_connected = False
+                except: self.is_connected = False
+                time.sleep(0.05)
 
     def execute_logic(self):
-        """실시간 쓰기 및 데이터 읽기. 맵 이동 시 False를 반환하여 재연결 트리거"""
-        data = {}
         try:
-            # 베이스 주소가 유효한지 체크
             trigger_val = self.pm.read_int(self.base_addr + ADDR_TRIGGER)
-            data["트리거 값"] = trigger_val
+            addr_motion = self.get_direct_addr(ATTACK_MOTION_PATH)
+            addr_speed = self.get_direct_addr(MOVE_SPEED_PATH)
+            if not addr_motion or not addr_speed: return False 
 
-            base_ptr = self.get_addr(ATTACK_MOTION_PATH[:-1])
-            addr_radar = self.base_addr + BASE_CALC_1 + RADAR_OFF
-            addr_char_speed = self.base_addr + BASE_CALC_1 + CHAR_SPEED_OFF
-            addr_100m = self.base_addr + BASE_CALC_1 + SELECT_100M_OFF
+            if trigger_val == 0 or self.controls["공격 모션"]["freeze"].isChecked():
+                self.force_write_rwx(addr_motion, self.controls["공격 모션"]["input"].value(), 'short')
+            
+            if trigger_val == 0 or self.controls["이동 속도"]["freeze"].isChecked():
+                self.force_write_rwx(addr_speed, self.controls["이동 속도"]["input"].value(), 'float')
 
-            # 맵 이동 직후 포인터가 깨진 상태면 재동기화 필요
-            if not base_ptr: return False
-
-            # [실시간 강제 쓰기] 트리거 0인 동안 0.1초마다 계속 덮어씀
             if trigger_val == 0:
-                self.safe_write(base_ptr + ATTACK_MOTION_PATH[-1], self.controls["공격 모션"]["input"].value(), 'short')
-                self.safe_write(base_ptr + MOVE_SPEED_PATH[-1], self.controls["이동 속도"]["input"].value(), 'float')
-                s_ptr = self.get_addr(STEALTH_PATH[:-1])
-                if s_ptr: self.safe_write(s_ptr + STEALTH_PATH[-1], 2560.0)
-                
-                self.safe_write(addr_radar, 400211.0)
-                self.safe_write(addr_char_speed, 8.0)
-                self.safe_write(addr_100m, 110.0 if self.check_100m.isChecked() else 50.0)
+                s_ptr = self.get_direct_addr(STEALTH_PATH)
+                if s_ptr: self.force_write_rwx(s_ptr, 2560.0, 'float')
+                self.force_write_rwx(self.base_addr + BASE_CALC_1 + RADAR_OFF, 400211.0, 'float')
+                self.force_write_rwx(self.base_addr + BASE_CALC_1 + CHAR_SPEED_OFF, 8.0, 'float')
+                self.force_write_rwx(self.base_addr + BASE_CALC_1 + SELECT_100M_OFF, 110.0 if self.check_100m.isChecked() else 50.0, 'float')
 
-            # 모니터링 데이터 수집
-            data["공격 모션"] = self.pm.read_short(base_ptr + ATTACK_MOTION_PATH[-1])
-            data["이동 속도"] = self.pm.read_float(base_ptr + MOVE_SPEED_PATH[-1])
-            s_ptr = self.get_addr(STEALTH_PATH[:-1])
-            if s_ptr: data["은신 활성화"] = self.pm.read_float(s_ptr + STEALTH_PATH[-1])
-            else: data["은신 활성화"] = "N/A"
-
-            data["레이더"] = self.pm.read_float(addr_radar)
-            data["케선 속도"] = self.pm.read_float(addr_char_speed)
-            data["100미터 선택"] = self.pm.read_float(addr_100m)
+            # 데이터 수집
+            data = {
+                "트리거 값": trigger_val,
+                "공격 모션": self.pm.read_short(addr_motion),
+                "이동 속도": self.pm.read_float(addr_speed),
+                "레이더": self.pm.read_float(self.base_addr + BASE_CALC_1 + RADAR_OFF),
+                "케선 속도": self.pm.read_float(self.base_addr + BASE_CALC_1 + CHAR_SPEED_OFF),
+                "100미터 선택": self.pm.read_float(self.base_addr + BASE_CALC_1 + SELECT_100M_OFF),
+                # Z축 기존값 - 4바이트 정수(Int)로 읽기
+                "(z축 기존값)": self.pm.read_int(self.base_addr + ADDR_Z_ORIGIN) 
+            }
+            
+            # Z축 현재값 - 4바이트 정수(Int)로 읽기
+            z_curr_addr = self.get_direct_addr(Z_CURRENT_PATH)
+            data["(z축 현재값)"] = self.pm.read_int(z_curr_addr) if z_curr_addr else 0
+            
+            s_ptr = self.get_direct_addr(STEALTH_PATH)
+            data["은신 활성화"] = self.pm.read_float(s_ptr) if s_ptr else "N/A"
             
             self.update_ui_signal.emit(data)
-            self.last_trigger_val = trigger_val
             return True
-        except:
-            # 맵 이동 시 위 read 과정에서 에러가 발생하면 재연결 루프로 보냄
-            return False
+        except: return False
 
-    def get_addr(self, offsets):
+    def get_direct_addr(self, path_offsets):
         try:
-            read_func = self.pm.read_longlong if self.is_64bit else self.pm.read_uint
-            addr = read_func(self.base_addr + POINTER_BASE)
+            addr = self.pm.read_longlong(self.base_addr + POINTER_BASE)
             if addr == 0: return None
-            for off in offsets:
-                addr = read_func(addr + off)
+            for i in range(len(path_offsets) - 1):
+                addr = self.pm.read_longlong(addr + path_offsets[i])
                 if addr == 0: return None
-            return addr
+            return addr + path_offsets[-1]
         except: return None
 
-    def safe_write(self, addr, value, vtype='float'):
+    def force_write_rwx(self, addr, value, vtype='float'):
         if not self.pm or not addr: return
         try:
             target_addr = int(addr)
             size = 4 if vtype in ['float', 'int'] else 2
-            old = ctypes.c_ulong()
-            if kernel32.VirtualProtectEx(self.pm.process_handle, target_addr, size, 0x40, ctypes.byref(old)):
+            old_p = ctypes.c_ulong()
+            if kernel32.VirtualProtectEx(self.pm.process_handle, target_addr, size, PAGE_EXECUTE_READWRITE, ctypes.byref(old_p)):
                 if vtype == 'float': self.pm.write_float(target_addr, float(value))
                 elif vtype == 'short': self.pm.write_short(target_addr, int(value))
                 elif vtype == 'int': self.pm.write_int(target_addr, int(value))
-                kernel32.VirtualProtectEx(self.pm.process_handle, target_addr, size, old, ctypes.byref(old))
+                kernel32.VirtualProtectEx(self.pm.process_handle, target_addr, size, old_p, ctypes.byref(old_p))
         except: pass
 
     def save_settings(self):
         try:
-            config = {"attack_motion": self.controls["공격 모션"]["input"].value(), "move_speed": self.controls["이동 속도"]["input"].value(), "check_100m": self.check_100m.isChecked()}
+            config = {
+                "attack_motion": self.controls["공격 모션"]["input"].value(),
+                "move_speed": self.controls["이동 속도"]["input"].value(),
+                "motion_freeze": self.controls["공격 모션"]["freeze"].isChecked(),
+                "speed_freeze": self.controls["이동 속도"]["freeze"].isChecked(),
+                "check_100m": self.check_100m.isChecked(),
+                "ontop": self.chk_ontop.isChecked()
+            }
             with open(CONFIG_PATH, "w") as f: json.dump(config, f)
-            self.append_log("💾 설정 저장 완료")
+            self.append_log("💾 설정 저장됨")
         except: pass
 
     def load_settings(self):
@@ -252,17 +296,27 @@ class AionTriggerHelper(QMainWindow):
                     d = json.load(f)
                     self.controls["공격 모션"]["input"].setValue(d.get("attack_motion", 0))
                     self.controls["이동 속도"]["input"].setValue(d.get("move_speed", 0.0))
+                    self.controls["공격 모션"]["freeze"].setChecked(d.get("motion_freeze", False))
+                    self.controls["이동 속도"]["freeze"].setChecked(d.get("speed_freeze", False))
                     self.check_100m.setChecked(d.get("check_100m", False))
+                    self.chk_ontop.setChecked(d.get("ontop", True))
+                    self.toggle_always_on_top(self.chk_ontop.isChecked())
             except: pass
 
     @pyqtSlot(dict)
     def sync_ui(self, data):
         for name, val in data.items():
-            if name in self.controls: self.controls[name]["view"].setText(str(val) if isinstance(val, (int, str)) else f"{val:.2f}")
+            if name in self.controls:
+                if not self.controls[name]["view"].hasFocus():
+                    # 4바이트 정수형은 소수점 없이 정수로 표시
+                    if name in ["(z축 기존값)", "(z축 현재값)"]:
+                        txt = str(val)
+                    else:
+                        txt = str(val) if isinstance(val, (int, str)) else f"{val:.2f}"
+                    self.controls[name]["view"].setText(txt)
 
     @pyqtSlot(str, str)
     def update_status_ui(self, t, c): self.status_info.setText(t); self.status_info.setStyleSheet(f"color: {c}; font-weight: bold;")
-
     @pyqtSlot(str)
     def append_log(self, m): self.log_box.append(f"[{time.strftime('%H:%M:%S')}] {m}"); self.log_box.moveCursor(QTextCursor.MoveOperation.End)
 
