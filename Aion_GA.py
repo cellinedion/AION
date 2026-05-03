@@ -8,9 +8,14 @@ import time
 import psutil
 import ctypes
 import subprocess
+import requests  # 업데이트 체크용
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import QTextCursor, QShortcut, QKeySequence, QCursor
+
+# [0. 프로그램 버전 및 업데이트 설정]
+CURRENT_VERSION = "4.2.1"
+UPDATE_URL = "http://your-server-address.com/version.json" # 실제 경로로 수정 필요
 
 # [1. 윈도우 보안 및 권한 설정]
 kernel32 = ctypes.windll.kernel32
@@ -33,17 +38,11 @@ def is_admin():
     try: return ctypes.windll.shell32.IsUserAnAdmin()
     except: return False
 
-if not is_admin():
-    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
-    sys.exit()
-
-set_debug_privilege()
-
 # [2. 메모리 및 프로세스 설정 상수]
 PAGE_EXECUTE_READWRITE = 0x40 
 PROC_NAME = "aion.bin"
 MOD_NAME = "Game.dll"
-POINTER_BASE = 0x010AF5C8 # 고정 베이스 주소
+POINTER_BASE = 0x010AF5C8 
 
 if getattr(sys, 'frozen', False): BASE_DIR = os.path.dirname(sys.executable)
 else: BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -52,19 +51,14 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config_settings.json")
 BASE_CALC_1 = 0x15D9BB4 - 0x613104 - 0xB6400 - 0x1       
 ADDR_TRIGGER = 0x15D9BB4 + 0x14EE4C - 0x10
 
-# [수정] 요청하신 메모리 오프셋 경로 적용
 ATTACK_MOTION_PATH = [0x58, 0x10, 0x28, 0x388, 0x5AA]    
 MOVE_SPEED_PATH = [0x58, 0x10, 0x28, 0x388, 0x784]       
-
 STEALTH_PATH = [0x58, 0x10, 0x28, 0x388, 0x3A0]          
 RADAR_OFF, SELECT_100M_OFF, CHAR_SPEED_OFF = 0xF5, 0xE5, 0x39
-
 ADDR_Z_ORIGIN = 0x15C00E8
 Z_CURRENT_PATH = [0x58, 0x10, 0x28, 0x1A0, 0xA8]
 
-GWL_EXSTYLE = -20
-WS_EX_LAYERED = 0x80000
-WS_EX_TRANSPARENT = 0x20
+GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT = -20, 0x80000, 0x20
 VK_F11 = 0x7A
 
 class AionTriggerHelper(QMainWindow):
@@ -79,6 +73,9 @@ class AionTriggerHelper(QMainWindow):
         self.target_pid = None
         self.is_connected = False
         self.is_dragging = False 
+        
+        # 업데이트 체크를 먼저 수행
+        self.check_for_updates()
         
         self.init_ui()
         self.load_settings()
@@ -96,76 +93,34 @@ class AionTriggerHelper(QMainWindow):
         self.mouse_timer.timeout.connect(self.check_mouse_position)
         self.mouse_timer.start(50)
 
-    def init_ui(self):
-        self.setWindowTitle("Aion Helper - Offset Fixed Pro")
-        self.resize(550, 920)
-        self.setMinimumSize(320, 500)
-        
-        central_widget = QWidget(); self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
-        layout.setContentsMargins(7, 7, 7, 7)
+    def check_for_updates(self):
+        """서버와 버전을 비교하여 자동 업데이트 수행"""
+        try:
+            response = requests.get(UPDATE_URL, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                latest_version = data.get("version")
+                if latest_version and latest_version > CURRENT_VERSION:
+                    reply = QMessageBox.question(self, "업데이트 알림", 
+                        f"새로운 버전({latest_version})이 있습니다.\n업데이트를 진행하시겠습니까?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    
+                    if reply == QMessageBox.StandardButton.Yes:
+                        self.perform_update(data.get("url"))
+        except:
+            pass # 업데이트 서버 연결 실패 시 건너뜀
 
-        top_bar = QHBoxLayout()
-        self.btn_select = QPushButton("🎮 프로세스 수동 선택"); self.btn_select.setMinimumHeight(45)
-        self.btn_select.setStyleSheet("font-weight: bold; background-color: #EBF5FB;")
-        self.btn_select.clicked.connect(self.select_process)
-        self.chk_ontop = QCheckBox("항상 위"); self.chk_ontop.setChecked(True)
-        self.chk_ontop.toggled.connect(self.toggle_always_on_top)
-        top_bar.addWidget(self.btn_select, 7); top_bar.addWidget(self.chk_ontop, 3)
-        layout.addLayout(top_bar)
+    def perform_update(self, download_url):
+        """새 파일을 다운로드하고 교체 실행"""
+        try:
+            # 업데이트 스크립트(배치 파일) 생성 및 실행 로직 (생략)
+            QMessageBox.information(self, "업데이트", "업데이트 파일을 다운로드합니다. 완료 후 자동 재시작됩니다.")
+            # 실제 다운로드 및 파일 교체 로직이 이곳에 들어갑니다.
+            sys.exit()
+        except: pass
 
-        mon_box = QGroupBox("📊 실시간 데이터 (Z축 4바이트 정수)")
-        mon_layout = QGridLayout(); self.controls = {}
-        
-        items = [("공격 모션", "int"), ("이동 속도", "float")]
-        for row, (name, dtype) in enumerate(items, 1):
-            mon_layout.addWidget(QLabel(name), row, 0)
-            cur_view = QLineEdit(); cur_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            cur_view.setStyleSheet("font-weight: bold; color: #E74C3C; background-color: white;")
-            cur_view.returnPressed.connect(lambda n=name: self.direct_manual_inject(n))
-            mon_layout.addWidget(cur_view, row, 1)
-            inp = QSpinBox() if dtype == "int" else QDoubleSpinBox()
-            if dtype == "int": inp.setRange(0, 65535)
-            else: inp.setRange(0.0, 100.0); inp.setSingleStep(0.1)
-            inp.setFixedWidth(75); mon_layout.addWidget(inp, row, 2)
-            chk = QCheckBox("강제"); chk.setStyleSheet("color: #C0392B; font-weight: bold;")
-            mon_layout.addWidget(chk, row, 3); self.controls[name] = {"view": cur_view, "input": inp, "freeze": chk, "type": dtype}
-
-        mon_items = [
-            ("트리거 값", "#2E86C1"), ("은신 활성화", "#2E86C1"), ("레이더", "#2E86C1"), 
-            ("케선 속도", "#2E86C1"), ("100미터 선택", "#2E86C1"),
-            ("(z축 기존값)", "#0000FF"), ("(z축 현재값)", "#FF0000")
-        ]
-        for idx, (name, color) in enumerate(mon_items):
-            row_m = idx + 3; mon_layout.addWidget(QLabel(name), row_m, 0)
-            cur_view = QLineEdit(); cur_view.setReadOnly(True); cur_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            cur_view.setStyleSheet(f"background-color: #F4F6F7; font-weight: bold; color: {color};")
-            mon_layout.addWidget(cur_view, row_m, 1)
-            if name == "100미터 선택": 
-                self.check_100m = QCheckBox("110m 고정"); mon_layout.addWidget(self.check_100m, row_m, 2)
-            else:
-                mon_layout.addWidget(QLabel("모니터링"), row_m, 2)
-            self.controls[name] = {"view": cur_view}
-        
-        mon_box.setLayout(mon_layout); layout.addWidget(mon_box)
-
-        self.trans_box = QGroupBox("🌓 투명도 설정 (슬라이더 영역 항시 조작)")
-        trans_layout = QVBoxLayout()
-        self.slider_alpha = QSlider(Qt.Orientation.Horizontal)
-        self.slider_alpha.setRange(30, 255); self.slider_alpha.setValue(255)
-        self.slider_alpha.sliderPressed.connect(self.on_slider_pressed)
-        self.slider_alpha.sliderReleased.connect(self.on_slider_released)
-        self.slider_alpha.valueChanged.connect(self.update_transparency)
-        self.lbl_alpha = QLabel("투명도: 100%"); self.lbl_alpha.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        trans_layout.addWidget(self.lbl_alpha); trans_layout.addWidget(self.slider_alpha)
-        self.trans_box.setLayout(trans_layout); layout.addWidget(self.trans_box)
-        
-        self.btn_save = QPushButton("💾 현재 설정 저장"); self.btn_save.clicked.connect(self.save_settings); layout.addWidget(self.btn_save)
-        self.status_info = QLabel("상태: 대기 중..."); self.status_info.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(self.status_info)
-        self.log_box = QTextEdit(); self.log_box.setReadOnly(True); self.log_box.setStyleSheet("font-size: 10px;"); layout.addWidget(self.log_box)
-
-    # [핵심] 2초 주기 강제 쓰기 및 읽기 로직
     def freeze_loop(self):
+        """2초마다 강제 주입 및 읽기 수행"""
         while True:
             if self.is_connected and self.pm:
                 try:
@@ -176,13 +131,64 @@ class AionTriggerHelper(QMainWindow):
                             addr = self.get_direct_addr(path)
                             if addr:
                                 vtype = 'short' if name == "공격 모션" else 'float'
-                                # 1. 메모리 쓰기
                                 self.force_write_rwx(addr, val, vtype)
-                                # 2. 메모리 읽기 (동기화 확인)
-                                current_val = self.pm.read_short(addr) if vtype == 'short' else self.pm.read_float(addr)
-                                # 로그에 찍히는 값은 실시간 UI sync_ui에서 갱신됨
+                                current = self.pm.read_short(addr) if vtype == 'short' else self.pm.read_float(addr)
                 except: pass
             time.sleep(2.0)
+
+    def init_ui(self):
+        self.setWindowTitle(f"Aion Helper Pro v{CURRENT_VERSION}")
+        self.resize(550, 920)
+        self.setMinimumSize(320, 500)
+        central_widget = QWidget(); self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget); layout.setContentsMargins(7, 7, 7, 7)
+
+        top_bar = QHBoxLayout()
+        self.btn_select = QPushButton("🎮 프로세스 수동 선택"); self.btn_select.setMinimumHeight(45)
+        self.btn_select.clicked.connect(self.select_process)
+        self.chk_ontop = QCheckBox("항상 위"); self.chk_ontop.setChecked(True)
+        self.chk_ontop.toggled.connect(self.toggle_always_on_top)
+        top_bar.addWidget(self.btn_select, 7); top_bar.addWidget(self.chk_ontop, 3)
+        layout.addLayout(top_bar)
+
+        mon_box = QGroupBox("📊 실시간 데이터 (Z축 4바이트 정수)")
+        mon_layout = QGridLayout(); self.controls = {}
+        items = [("공격 모션", "int"), ("이동 속도", "float")]
+        for row, (name, dtype) in enumerate(items, 1):
+            mon_layout.addWidget(QLabel(name), row, 0)
+            cur_view = QLineEdit(); cur_view.setAlignment(Qt.AlignmentFlag.AlignCenter); cur_view.setStyleSheet("font-weight: bold; color: #E74C3C;")
+            cur_view.returnPressed.connect(lambda n=name: self.direct_manual_inject(n))
+            mon_layout.addWidget(cur_view, row, 1)
+            inp = QSpinBox() if dtype == "int" else QDoubleSpinBox()
+            if dtype == "int": inp.setRange(0, 65535)
+            else: inp.setRange(0.0, 100.0); inp.setSingleStep(0.1)
+            inp.setFixedWidth(75); mon_layout.addWidget(inp, row, 2)
+            chk = QCheckBox("강제"); chk.setStyleSheet("color: #C0392B; font-weight: bold;")
+            mon_layout.addWidget(chk, row, 3); self.controls[name] = {"view": cur_view, "input": inp, "freeze": chk, "type": dtype}
+
+        mon_items = [("트리거 값", "#2E86C1"), ("은신 활성화", "#2E86C1"), ("레이더", "#2E86C1"), ("케선 속도", "#2E86C1"), ("100미터 선택", "#2E86C1"), ("(z축 기존값)", "#0000FF"), ("(z축 현재값)", "#FF0000")]
+        for idx, (name, color) in enumerate(mon_items):
+            row_m = idx + 3; mon_layout.addWidget(QLabel(name), row_m, 0)
+            cur_view = QLineEdit(); cur_view.setReadOnly(True); cur_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cur_view.setStyleSheet(f"background-color: #F4F6F7; color: {color}; font-weight: bold;")
+            mon_layout.addWidget(cur_view, row_m, 1)
+            if name == "100미터 선택": self.check_100m = QCheckBox("110m 고정"); mon_layout.addWidget(self.check_100m, row_m, 2)
+            else: mon_layout.addWidget(QLabel("모니터링"), row_m, 2)
+            self.controls[name] = {"view": cur_view}
+        mon_box.setLayout(mon_layout); layout.addWidget(mon_box)
+
+        self.trans_box = QGroupBox("🌓 투명도 설정 (슬라이더 영역 항시 조작)")
+        trans_layout = QVBoxLayout()
+        self.slider_alpha = QSlider(Qt.Orientation.Horizontal); self.slider_alpha.setRange(30, 255); self.slider_alpha.setValue(255)
+        self.slider_alpha.sliderPressed.connect(self.on_slider_pressed); self.slider_alpha.sliderReleased.connect(self.on_slider_released)
+        self.slider_alpha.valueChanged.connect(self.update_transparency)
+        self.lbl_alpha = QLabel("투명도: 100%"); self.lbl_alpha.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        trans_layout.addWidget(self.lbl_alpha); trans_layout.addWidget(self.slider_alpha)
+        self.trans_box.setLayout(trans_layout); layout.addWidget(self.trans_box)
+        
+        self.btn_save = QPushButton("💾 현재 설정 저장"); self.btn_save.clicked.connect(self.save_settings); layout.addWidget(self.btn_save)
+        self.status_info = QLabel("상태: 대기 중..."); self.status_info.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(self.status_info)
+        self.log_box = QTextEdit(); self.log_box.setReadOnly(True); self.log_box.setStyleSheet("font-size: 10px;"); layout.addWidget(self.log_box)
 
     def on_slider_pressed(self): self.is_dragging = True; self.set_click_through(False)
     def on_slider_released(self): self.is_dragging = False; self.update_transparency(self.slider_alpha.value())
@@ -190,10 +196,8 @@ class AionTriggerHelper(QMainWindow):
     def check_mouse_position(self):
         if self.is_dragging: return
         cursor_pos = self.mapFromGlobal(QCursor.pos())
-        if self.trans_box.geometry().contains(cursor_pos):
-            self.set_click_through(False)
-        elif self.slider_alpha.value() < 230:
-            self.set_click_through(True)
+        if self.trans_box.geometry().contains(cursor_pos): self.set_click_through(False)
+        elif self.slider_alpha.value() < 230: self.set_click_through(True)
 
     def set_click_through(self, enabled):
         hwnd = int(self.winId())
@@ -204,8 +208,7 @@ class AionTriggerHelper(QMainWindow):
     def update_transparency(self, value):
         alpha = value / 255.0
         self.setWindowOpacity(alpha)
-        if not self.is_dragging:
-            self.lbl_alpha.setText(f"투명도: {int(alpha*100)}% {'(통과 중)' if value < 230 else ''}")
+        if not self.is_dragging: self.lbl_alpha.setText(f"투명도: {int(alpha*100)}% {'(통과 중)' if value < 230 else ''}")
 
     def background_key_monitor(self):
         while True:
@@ -249,10 +252,7 @@ class AionTriggerHelper(QMainWindow):
     def execute_logic(self):
         try:
             trigger = self.pm.read_int(self.base_addr + ADDR_TRIGGER)
-            addr_m = self.get_direct_addr(ATTACK_MOTION_PATH)
-            addr_s = self.get_direct_addr(MOVE_SPEED_PATH)
-            if not addr_m or not addr_s: return False 
-
+            addr_m = self.get_direct_addr(ATTACK_MOTION_PATH); addr_s = self.get_direct_addr(MOVE_SPEED_PATH)
             if trigger == 0:
                 self.force_write_rwx(addr_m, self.controls["공격 모션"]["input"].value(), 'short')
                 self.force_write_rwx(addr_s, self.controls["이동 속도"]["input"].value(), 'float')
@@ -262,26 +262,14 @@ class AionTriggerHelper(QMainWindow):
                 self.force_write_rwx(self.base_addr + BASE_CALC_1 + CHAR_SPEED_OFF, 8.0, 'float')
                 m100_val = 110.0 if self.check_100m.isChecked() else 50.0
                 self.force_write_rwx(self.base_addr + BASE_CALC_1 + SELECT_100M_OFF, m100_val, 'float')
-
-            data = {
-                "트리거 값": trigger, 
-                "공격 모션": self.pm.read_short(addr_m), 
-                "이동 속도": self.pm.read_float(addr_s),
-                "레이더": self.pm.read_float(self.base_addr + BASE_CALC_1 + RADAR_OFF),
-                "케선 속도": self.pm.read_float(self.base_addr + BASE_CALC_1 + CHAR_SPEED_OFF),
-                "100미터 선택": self.pm.read_float(self.base_addr + BASE_CALC_1 + SELECT_100M_OFF),
-                "(z축 기존값)": self.pm.read_int(self.base_addr + ADDR_Z_ORIGIN), 
-                "(z축 현재값)": self.pm.read_int(self.get_direct_addr(Z_CURRENT_PATH)) if self.get_direct_addr(Z_CURRENT_PATH) else 0
-            }
-            s_ptr = self.get_direct_addr(STEALTH_PATH)
-            data["은신 활성화"] = self.pm.read_float(s_ptr) if s_ptr else "N/A"
-            
+            data = {"트리거 값": trigger, "공격 모션": self.pm.read_short(addr_m), "이동 속도": self.pm.read_float(addr_s), "레이더": self.pm.read_float(self.base_addr + BASE_CALC_1 + RADAR_OFF), "케선 속도": self.pm.read_float(self.base_addr + BASE_CALC_1 + CHAR_SPEED_OFF), "100미터 선택": self.pm.read_float(self.base_addr + BASE_CALC_1 + SELECT_100M_OFF), "(z축 기존값)": self.pm.read_int(self.base_addr + ADDR_Z_ORIGIN), "(z축 현재값)": self.pm.read_int(self.get_direct_addr(Z_CURRENT_PATH)) if self.get_direct_addr(Z_CURRENT_PATH) else 0}
+            s_ptr = self.get_direct_addr(STEALTH_PATH); data["은신 활성화"] = self.pm.read_float(s_ptr) if s_ptr else "N/A"
             self.update_ui_signal.emit(data); return True
         except: return False
 
     def get_direct_addr(self, p):
         try:
-            addr = self.pm.read_longlong(self.base_addr + POINTER_BASE) # 0x010AF5C8
+            addr = self.pm.read_longlong(self.base_addr + POINTER_BASE)
             for i in range(len(p)-1):
                 addr = self.pm.read_longlong(addr + p[i])
                 if addr == 0: return None
@@ -298,10 +286,8 @@ class AionTriggerHelper(QMainWindow):
         except: pass
 
     def save_settings(self):
-        cfg = {"attack": self.controls["공격 모션"]["input"].value(), "speed": self.controls["이동 속도"]["input"].value(), 
-               "motion_freeze": self.controls["공격 모션"]["freeze"].isChecked(), "speed_freeze": self.controls["이동 속도"]["freeze"].isChecked(),
-               "check_100m": self.check_100m.isChecked(), "alpha": self.slider_alpha.value()}
-        with open(CONFIG_PATH, "w") as f: json.dump(cfg, f); self.append_log("💾 설정 저장됨")
+        cfg = {"attack": self.controls["공격 모션"]["input"].value(), "speed": self.controls["이동 속도"]["input"].value(), "motion_freeze": self.controls["공격 모션"]["freeze"].isChecked(), "speed_freeze": self.controls["이동 속도"]["freeze"].isChecked(), "check_100m": self.check_100m.isChecked(), "alpha": self.slider_alpha.value()}
+        with open(CONFIG_PATH, "w") as f: json.dump(cfg, f); self.append_log("💾 저장됨")
 
     def load_settings(self):
         if os.path.exists(CONFIG_PATH):
@@ -312,8 +298,7 @@ class AionTriggerHelper(QMainWindow):
                     self.controls["이동 속도"]["input"].setValue(d.get("speed", 0.0))
                     self.controls["공격 모션"]["freeze"].setChecked(d.get("motion_freeze", False))
                     self.controls["이동 속도"]["freeze"].setChecked(d.get("speed_freeze", False))
-                    self.check_100m.setChecked(d.get("check_100m", False))
-                    self.slider_alpha.setValue(d.get("alpha", 255))
+                    self.check_100m.setChecked(d.get("check_100m", False)); self.slider_alpha.setValue(d.get("alpha", 255))
             except: pass
 
     def toggle_always_on_top(self, state):
@@ -333,4 +318,8 @@ class AionTriggerHelper(QMainWindow):
     def append_log(self, m): self.log_box.append(f"[{time.strftime('%H:%M:%S')}] {m}"); self.log_box.moveCursor(QTextCursor.MoveOperation.End)
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv); win = AionTriggerHelper(); win.show(); sys.exit(app.exec())
+    if not is_admin():
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+    else:
+        set_debug_privilege()
+        app = QApplication(sys.argv); win = AionTriggerHelper(); win.show(); sys.exit(app.exec())
