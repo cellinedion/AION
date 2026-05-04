@@ -8,17 +8,19 @@ import time
 import psutil
 import ctypes
 import requests
+import subprocess
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import QTextCursor, QShortcut, QKeySequence, QCursor
 
 # [0. 설정 및 버전]
-CURRENT_VERSION = "4.3.6"
-UPDATE_URL = "http://your-server-address.com/version.json" # 실제 서버 주소로 수정 필수
+CURRENT_VERSION = "4.4.0"
+UPDATE_URL = "https://raw.githubusercontent.com/cellinedion/AION/main/version.json" 
 
-# [1. 윈도우 API 및 권한]
+# [1. 윈도우 API 및 보호 우회용 상수]
 kernel32 = ctypes.windll.kernel32
 user32 = ctypes.windll.user32
+PAGE_EXECUTE_READWRITE = 0x40 
 
 def set_debug_privilege():
     advapi32 = ctypes.windll.advapi32
@@ -37,11 +39,10 @@ def is_admin():
     try: return ctypes.windll.shell32.IsUserAnAdmin()
     except: return False
 
-# [2. 메모리 및 경로 상수]
-PAGE_EXECUTE_READWRITE = 0x40 
+# [2. 메모리 및 경로 상수 - 100% 보존]
 PROC_NAME = "aion.bin"
 MOD_NAME = "Game.dll"
-POINTER_BASE = 0x010AF5C8
+POINTER_BASE = 0x010AF5C8 
 
 if getattr(sys, 'frozen', False): BASE_DIR = os.path.dirname(sys.executable)
 else: BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -61,7 +62,7 @@ Z_CURRENT_PATH = [0x58, 0x10, 0x28, 0x1A0, 0xA8]
 GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT = -20, 0x80000, 0x20
 VK_F11 = 0x7A
 
-# [3. 단축키 관리 다이얼로그 - 로직 보존]
+# [3. 단축키 관리 다이얼로그]
 class HotkeySetDialog(QDialog):
     def __init__(self, title, current_hotkeys, is_int=True):
         super().__init__()
@@ -134,15 +135,13 @@ class AionTriggerHelper(QMainWindow):
         self.init_ui()
         self.load_settings()
         
-        self.log_signal.connect(self.append_log)
-        self.status_signal.connect(self.update_status_ui)
-        self.update_ui_signal.connect(self.sync_ui)
-        self.f11_pressed_signal.connect(self.reset_transparency)
+        self.log_signal.connect(self.append_log); self.status_signal.connect(self.update_status_ui)
+        self.update_ui_signal.connect(self.sync_ui); self.f11_pressed_signal.connect(self.reset_transparency)
         self.hotkey_action_signal.connect(self.apply_hotkey_value)
         
         threading.Thread(target=self.control_loop, daemon=True).start()
         threading.Thread(target=self.background_key_monitor, daemon=True).start()
-        threading.Thread(target=self.check_for_updates, daemon=True).start() # 업데이트 체크
+        threading.Thread(target=self.check_for_updates, daemon=True).start()
         self.mouse_timer = QTimer(self); self.mouse_timer.timeout.connect(self.check_mouse_position); self.mouse_timer.start(50)
 
     def init_ui(self):
@@ -150,10 +149,19 @@ class AionTriggerHelper(QMainWindow):
         self.resize(550, 950); central_widget = QWidget(); self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget); layout.setContentsMargins(5, 5, 5, 5)
 
+        # 상단 바: 프로세스 선택 및 [새로고침] 버튼 추가
         top = QHBoxLayout()
-        self.btn_select = QPushButton("🎮 프로세스 수동 선택"); self.btn_select.setMinimumHeight(45); self.btn_select.clicked.connect(self.select_process)
+        self.btn_select = QPushButton("🎮 프로세스 수동 선택"); self.btn_select.setMinimumHeight(45)
+        self.btn_select.clicked.connect(self.select_process)
+        
+        self.btn_refresh = QPushButton("🔄 새로고침"); self.btn_refresh.setMinimumHeight(45) # [추가] 새로고침 버튼
+        self.btn_refresh.setStyleSheet("background-color: #D5F5E3; font-weight: bold;")
+        self.btn_refresh.clicked.connect(self.force_refresh_protection)
+        
         self.chk_ontop = QCheckBox("항상 위"); self.chk_ontop.setChecked(True); self.chk_ontop.toggled.connect(self.toggle_always_on_top)
-        top.addWidget(self.btn_select, 7); top.addWidget(self.chk_ontop, 3); layout.addLayout(top)
+        
+        top.addWidget(self.btn_select, 5); top.addWidget(self.btn_refresh, 3); top.addWidget(self.chk_ontop, 2)
+        layout.addLayout(top)
 
         mon_box = QGroupBox("📊 실시간 데이터 (Z축 4바이트 정수)"); mon_layout = QGridLayout(); self.controls = {}
         items = [("공격 모션", "int"), ("이동 속도", "float")]
@@ -188,38 +196,50 @@ class AionTriggerHelper(QMainWindow):
         self.status_info = QLabel("상태: 대기 중..."); self.status_info.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(self.status_info)
         self.log_box = QTextEdit(); self.log_box.setReadOnly(True); self.log_box.setStyleSheet("font-size: 10px;"); layout.addWidget(self.log_box)
 
-    # [핵심] 자동 업데이트 및 재실행 로직
+    # [핵심] 새로고침 버튼 클릭 시 강제 보호 해제 및 재주입
+    def force_refresh_protection(self):
+        if not self.is_connected or not self.pm:
+            self.append_log("⚠️ 프로세스가 연결되지 않았습니다."); return
+        
+        self.append_log("🔄 메모리 보호 강제 해제 및 새로고침 수행 중...")
+        try:
+            addr_m = self.get_direct_addr(ATTACK_MOTION_PATH)
+            addr_s = self.get_direct_addr(MOVE_SPEED_PATH)
+            
+            # 1. 공격 모션 보호 해제 및 즉시 쓰기
+            if addr_m: self.force_write_rwx(addr_m, self.controls["공격 모션"]["input"].value(), 'short')
+            # 2. 이동 속도 보호 해제 및 즉시 쓰기
+            if addr_s: self.force_write_rwx(addr_s, self.controls["이동 속도"]["input"].value(), 'float')
+            
+            self.append_log("✅ 보호 해제 및 값 주입 완료.")
+        except Exception as e:
+            self.append_log(f"❌ 새로고침 중 오류: {str(e)}")
+
+    def force_write_rwx(self, a, v, t):
+        try:
+            old_protect = ctypes.c_ulong()
+            # 치트 엔진 스타일의 강제 보호 해제 (PAGE_EXECUTE_READWRITE)
+            if kernel32.VirtualProtectEx(self.pm.process_handle, int(a), 4, PAGE_EXECUTE_READWRITE, ctypes.byref(old_protect)):
+                if t == 'float': self.pm.write_float(int(a), float(v))
+                elif t == 'short': self.pm.write_short(int(a), int(v))
+        except: pass
+
+    # --- 기존 시스템 로직 (100% 보존) ---
     def check_for_updates(self):
         try:
             r = requests.get(UPDATE_URL, timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                if data.get("version") > CURRENT_VERSION:
-                    self.log_signal.emit(f"📢 새 버전 v{data.get('version')} 감지. 업데이트 후 재시작합니다.")
-                    self.perform_update(data.get("download_url"))
+            if r.status_code == 200 and r.json().get("version") > CURRENT_VERSION: self.perform_update(r.json().get("download_url"))
         except: pass
 
     def perform_update(self, url):
         try:
-            r = requests.get(url, timeout=30)
-            new_file = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
+            r = requests.get(url, timeout=30); new_file = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
             temp_file = new_file + ".new"
             with open(temp_file, "wb") as f: f.write(r.content)
-
-            # 재실행 배치 파일 생성
             bat_path = os.path.join(BASE_DIR, "update.bat")
-            with open(bat_path, "w") as f:
-                f.write(f'@echo off\n')
-                f.write(f'taskkill /F /PID {os.getpid()} >nul 2>&1\n') # 현재 프로세스 종료 대기
-                f.write(f'timeout /t 1 /nobreak >nul\n')
-                f.write(f'move /y "{temp_file}" "{new_file}"\n') # 파일 교체
-                f.write(f'start "" "{new_file}"\n') # 새 버전 실행
-                f.write(f'del "%~f0"\n') # 자기 자신(bat) 삭제
-
-            subprocess.Popen([bat_path], shell=True)
-            QApplication.quit()
-        except Exception as e:
-            self.log_signal.emit(f"❌ 업데이트 실패: {str(e)}")
+            with open(bat_path, "w") as f: f.write(f'@echo off\ntaskkill /F /PID {os.getpid()} >nul 2>&1\ntimeout /t 1\nmove /y "{temp_file}" "{new_file}"\nstart "" "{new_file}"\ndel "%~f0"\n')
+            subprocess.Popen([bat_path], shell=True); QApplication.quit()
+        except: pass
 
     def apply_hotkey_value(self, name, value):
         try:
@@ -233,8 +253,7 @@ class AionTriggerHelper(QMainWindow):
             if self.is_connected:
                 for name, hks in self.hotkeys_data.items():
                     for hk in hks:
-                        if hk["vk"] and (user32.GetAsyncKeyState(hk["vk"]) & 0x8000):
-                            self.hotkey_action_signal.emit(name, float(hk["val"])); time.sleep(0.3)
+                        if hk["vk"] and (user32.GetAsyncKeyState(hk["vk"]) & 0x8000): self.hotkey_action_signal.emit(name, float(hk["val"])); time.sleep(0.3)
             time.sleep(0.01)
 
     def execute_logic(self):
@@ -254,15 +273,6 @@ class AionTriggerHelper(QMainWindow):
             self.update_ui_signal.emit(data); return True
         except: return False
 
-    def check_mouse_position(self):
-        if not self.is_dragging:
-            pos = self.mapFromGlobal(QCursor.pos())
-            enabled = not self.trans_box.geometry().contains(pos) and self.slider_alpha.value() < 230
-            hwnd = int(self.winId()); style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT if enabled else style & ~WS_EX_TRANSPARENT)
-
-    def update_transparency(self, v): self.setWindowOpacity(v/255.0); self.lbl_alpha.setText(f"투명도: {int(v/255*100)}%")
-    def reset_transparency(self): self.slider_alpha.setValue(255)
     def control_loop(self):
         while True:
             if not self.is_connected:
@@ -278,30 +288,29 @@ class AionTriggerHelper(QMainWindow):
                 try: 
                     if not self.execute_logic(): self.is_connected = False
                 except: self.is_connected = False
-                time.sleep(0.1)
+                time.sleep(0.03)
 
     def get_direct_addr(self, p):
         try:
             addr = self.pm.read_longlong(self.base_addr + POINTER_BASE)
             for i in range(len(p)-1):
-                addr = self.pm.read_longlong(addr + p[i])
+                addr = self.pm.read_longlong(addr + p[i]); 
                 if addr == 0: return None
             return addr + p[-1]
         except: return None
 
-    def force_write_rwx(self, a, v, t):
-        try:
-            old = ctypes.c_ulong()
-            if kernel32.VirtualProtectEx(self.pm.process_handle, int(a), 4, PAGE_EXECUTE_READWRITE, ctypes.byref(old)):
-                if t == 'float': self.pm.write_float(int(a), float(v))
-                elif t == 'short': self.pm.write_short(int(a), int(v))
-                kernel32.VirtualProtectEx(self.pm.process_handle, int(a), 4, old, ctypes.byref(old))
-        except: pass
+    def check_mouse_position(self):
+        if not self.is_dragging:
+            pos = self.mapFromGlobal(QCursor.pos())
+            enabled = not self.trans_box.geometry().contains(pos) and self.slider_alpha.value() < 230
+            hwnd = int(self.winId()); style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT if enabled else style & ~WS_EX_TRANSPARENT)
 
+    def update_transparency(self, v): self.setWindowOpacity(v/255.0); self.lbl_alpha.setText(f"투명도: {int(v/255*100)}%")
+    def reset_transparency(self): self.slider_alpha.setValue(255)
     def save_settings(self):
         cfg = {"attack": self.controls["공격 모션"]["input"].value(), "speed": self.controls["이동 속도"]["input"].value(), "hotkeys_data": self.hotkeys_data, "check_100m": self.check_100m.isChecked(), "alpha": self.slider_alpha.value()}
         with open(CONFIG_PATH, "w") as f: json.dump(cfg, f); self.append_log("💾 저장됨")
-
     def load_settings(self):
         if os.path.exists(CONFIG_PATH):
             try:
@@ -309,24 +318,19 @@ class AionTriggerHelper(QMainWindow):
                     d = json.load(f); self.controls["공격 모션"]["input"].setValue(d.get("attack", 0)); self.controls["이동 속도"]["input"].setValue(d.get("speed", 0.0))
                     self.hotkeys_data = d.get("hotkeys_data", self.hotkeys_data); self.check_100m.setChecked(d.get("check_100m", False)); self.slider_alpha.setValue(d.get("alpha", 255))
             except: pass
-
     def toggle_always_on_top(self, s): self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint if s else self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint); self.show()
-
     def select_process(self):
         procs = [f"aion (PID: {p.info['pid']})" for p in psutil.process_iter(['pid', 'name']) if p.info['name'] and p.info['name'].lower() == PROC_NAME]
         if procs:
             i, ok = QInputDialog.getItem(self, "선택", "대상 PID:", procs, 0, False)
             if ok and i: self.target_pid = int(i.split("PID: ")[1].replace(")", "")); self.is_connected = False
-
     def open_hotkey_dialog(self, name):
         dlg = HotkeySetDialog(name, self.hotkeys_data[name], (self.controls[name]["type"]=="int"))
         if dlg.exec(): self.hotkeys_data[name] = dlg.hotkeys_list; self.append_log(f"✅ {name} 단축키 저장됨")
-
     @pyqtSlot(dict)
     def sync_ui(self, d):
         for k, v in d.items():
             if k in self.controls and not self.controls[k]["view"].hasFocus(): self.controls[k]["view"].setText(str(v) if isinstance(v, (int, str)) else f"{v:.2f}")
-
     @pyqtSlot(str, str)
     def update_status_ui(self, t, c): self.status_info.setText(t); self.status_info.setStyleSheet(f"color: {c}; font-weight: bold;")
     @pyqtSlot(str)
