@@ -13,8 +13,8 @@ from PyQt6.QtCore import *
 from PyQt6.QtGui import QTextCursor, QShortcut, QKeySequence, QCursor
 
 # [0. 설정 및 버전]
-CURRENT_VERSION = "4.3.5"
-UPDATE_URL = "http://your-server-address.com/version.json" 
+CURRENT_VERSION = "4.3.6"
+UPDATE_URL = "http://your-server-address.com/version.json" # 실제 서버 주소로 수정 필수
 
 # [1. 윈도우 API 및 권한]
 kernel32 = ctypes.windll.kernel32
@@ -37,11 +37,11 @@ def is_admin():
     try: return ctypes.windll.shell32.IsUserAnAdmin()
     except: return False
 
-# [2. 메모리 및 경로 상수 - 100% 보존]
+# [2. 메모리 및 경로 상수]
 PAGE_EXECUTE_READWRITE = 0x40 
 PROC_NAME = "aion.bin"
 MOD_NAME = "Game.dll"
-POINTER_BASE = 0x010AF5C8 
+POINTER_BASE = 0x010AF5C8
 
 if getattr(sys, 'frozen', False): BASE_DIR = os.path.dirname(sys.executable)
 else: BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -51,8 +51,8 @@ BASE_CALC_1 = 0x15D9BB4 - 0x613104 - 0xB6400 - 0x1
 ADDR_TRIGGER1 = 0x15D9BB4 + 0x14EE4C - 0x10
 ADDR_TRIGGER2 = 0x15D9BB4 - 0x4AE8
 
-ATTACK_MOTION_PATH = [0x58, 0x10, 0x28, 0x388, 0x5AA]    
-MOVE_SPEED_PATH = [0x58, 0x10, 0x28, 0x388, 0x784]       
+ATTACK_MOTION_PATH = [0x58, 0x10, 0x28, 0x388, 0x5AA]
+MOVE_SPEED_PATH = [0x58, 0x10, 0x28, 0x388, 0x784]
 STEALTH_PATH = [0x58, 0x10, 0x28, 0x388, 0x3A0]          
 RADAR_OFF, SELECT_100M_OFF, CHAR_SPEED_OFF = 0xF5, 0xE5, 0x39
 ADDR_Z_ORIGIN = 0x15C00E8
@@ -61,7 +61,7 @@ Z_CURRENT_PATH = [0x58, 0x10, 0x28, 0x1A0, 0xA8]
 GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT = -20, 0x80000, 0x20
 VK_F11 = 0x7A
 
-# [3. 단축키 관리 다이얼로그]
+# [3. 단축키 관리 다이얼로그 - 로직 보존]
 class HotkeySetDialog(QDialog):
     def __init__(self, title, current_hotkeys, is_int=True):
         super().__init__()
@@ -69,15 +69,13 @@ class HotkeySetDialog(QDialog):
         self.setMinimumSize(320, 300)
         self.hotkeys_list = current_hotkeys if isinstance(current_hotkeys, list) else []
         self.is_int = is_int
-        self.temp_vk = None
-        self.temp_key = None
+        self.temp_vk, self.temp_key = None, None
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
         self.list_widget = QListWidget()
-        for hk in self.hotkeys_list:
-            self.list_widget.addItem(f"키: {hk['key']} | 값: {hk['val']}")
+        for hk in self.hotkeys_list: self.list_widget.addItem(f"키: {hk['key']} | 값: {hk['val']}")
         layout.addWidget(QLabel("등록된 단축키 목록:"))
         layout.addWidget(self.list_widget)
 
@@ -85,11 +83,9 @@ class HotkeySetDialog(QDialog):
         input_layout = QGridLayout()
         self.btn_capture = QPushButton("키 입력 대기...")
         self.btn_capture.clicked.connect(self.start_capture)
-        
         self.val_input = QSpinBox() if self.is_int else QDoubleSpinBox()
         if self.is_int: self.val_input.setRange(0, 65535)
         else: self.val_input.setRange(0.0, 100.0); self.val_input.setDecimals(2); self.val_input.setSingleStep(0.01)
-        
         input_layout.addWidget(QLabel("키:"), 0, 0); input_layout.addWidget(self.btn_capture, 0, 1)
         input_layout.addWidget(QLabel("값:"), 1, 0); input_layout.addWidget(self.val_input, 1, 1)
         input_box.setLayout(input_layout); layout.addWidget(input_box)
@@ -99,12 +95,10 @@ class HotkeySetDialog(QDialog):
         self.btn_del = QPushButton("선택 삭제"); self.btn_del.clicked.connect(self.delete_hotkey)
         btn_row.addWidget(self.btn_add); btn_row.addWidget(self.btn_del); layout.addLayout(btn_row)
 
-        self.btn_close = QPushButton("닫기 및 저장"); self.btn_close.clicked.connect(self.accept)
-        layout.addWidget(self.btn_close)
+        self.btn_close = QPushButton("닫기 및 저장"); self.btn_close.clicked.connect(self.accept); layout.addWidget(self.btn_close)
         self.installEventFilter(self)
 
     def start_capture(self): self.btn_capture.setText("키를 누르세요..."); self.setFocus()
-
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress and self.btn_capture.text() == "키를 누르세요...":
             vk = event.nativeVirtualKey()
@@ -116,9 +110,8 @@ class HotkeySetDialog(QDialog):
 
     def add_hotkey(self):
         if self.temp_key and self.temp_vk:
-            new_hk = {"key": self.temp_key, "vk": self.temp_vk, "val": self.val_input.value()}
-            self.hotkeys_list.append(new_hk)
-            self.list_widget.addItem(f"키: {self.temp_key} | 값: {new_hk['val']}")
+            self.hotkeys_list.append({"key": self.temp_key, "vk": self.temp_vk, "val": self.val_input.value()})
+            self.list_widget.addItem(f"키: {self.temp_key} | 값: {self.val_input.value()}")
             self.temp_key = None; self.btn_capture.setText("키 입력 대기...")
 
     def delete_hotkey(self):
@@ -149,7 +142,7 @@ class AionTriggerHelper(QMainWindow):
         
         threading.Thread(target=self.control_loop, daemon=True).start()
         threading.Thread(target=self.background_key_monitor, daemon=True).start()
-        threading.Thread(target=self.check_for_updates, daemon=True).start()
+        threading.Thread(target=self.check_for_updates, daemon=True).start() # 업데이트 체크
         self.mouse_timer = QTimer(self); self.mouse_timer.timeout.connect(self.check_mouse_position); self.mouse_timer.start(50)
 
     def init_ui(self):
@@ -158,10 +151,8 @@ class AionTriggerHelper(QMainWindow):
         layout = QVBoxLayout(central_widget); layout.setContentsMargins(5, 5, 5, 5)
 
         top = QHBoxLayout()
-        self.btn_select = QPushButton("🎮 프로세스 수동 선택"); self.btn_select.setMinimumHeight(45)
-        self.btn_select.clicked.connect(self.select_process)
-        self.chk_ontop = QCheckBox("항상 위"); self.chk_ontop.setChecked(True)
-        self.chk_ontop.toggled.connect(self.toggle_always_on_top)
+        self.btn_select = QPushButton("🎮 프로세스 수동 선택"); self.btn_select.setMinimumHeight(45); self.btn_select.clicked.connect(self.select_process)
+        self.chk_ontop = QCheckBox("항상 위"); self.chk_ontop.setChecked(True); self.chk_ontop.toggled.connect(self.toggle_always_on_top)
         top.addWidget(self.btn_select, 7); top.addWidget(self.chk_ontop, 3); layout.addLayout(top)
 
         mon_box = QGroupBox("📊 실시간 데이터 (Z축 4바이트 정수)"); mon_layout = QGridLayout(); self.controls = {}
@@ -187,9 +178,7 @@ class AionTriggerHelper(QMainWindow):
             self.controls[name] = {"view": v}
         mon_box.setLayout(mon_layout); layout.addWidget(mon_box)
 
-        # [수정] self.trans_box로 선언하여 AttributeError 방지
-        self.trans_box = QGroupBox("🌓 투명도 설정")
-        t_layout = QVBoxLayout()
+        self.trans_box = QGroupBox("🌓 투명도 설정"); t_layout = QVBoxLayout()
         self.slider_alpha = QSlider(Qt.Orientation.Horizontal); self.slider_alpha.setRange(30, 255); self.slider_alpha.setValue(255)
         self.slider_alpha.valueChanged.connect(self.update_transparency)
         self.lbl_alpha = QLabel("투명도: 100%"); self.lbl_alpha.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -199,9 +188,38 @@ class AionTriggerHelper(QMainWindow):
         self.status_info = QLabel("상태: 대기 중..."); self.status_info.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(self.status_info)
         self.log_box = QTextEdit(); self.log_box.setReadOnly(True); self.log_box.setStyleSheet("font-size: 10px;"); layout.addWidget(self.log_box)
 
-    def open_hotkey_dialog(self, name):
-        dlg = HotkeySetDialog(name, self.hotkeys_data[name], (self.controls[name]["type"]=="int"))
-        if dlg.exec(): self.hotkeys_data[name] = dlg.hotkeys_list; self.append_log(f"✅ {name} 단축키 저장됨")
+    # [핵심] 자동 업데이트 및 재실행 로직
+    def check_for_updates(self):
+        try:
+            r = requests.get(UPDATE_URL, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("version") > CURRENT_VERSION:
+                    self.log_signal.emit(f"📢 새 버전 v{data.get('version')} 감지. 업데이트 후 재시작합니다.")
+                    self.perform_update(data.get("download_url"))
+        except: pass
+
+    def perform_update(self, url):
+        try:
+            r = requests.get(url, timeout=30)
+            new_file = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
+            temp_file = new_file + ".new"
+            with open(temp_file, "wb") as f: f.write(r.content)
+
+            # 재실행 배치 파일 생성
+            bat_path = os.path.join(BASE_DIR, "update.bat")
+            with open(bat_path, "w") as f:
+                f.write(f'@echo off\n')
+                f.write(f'taskkill /F /PID {os.getpid()} >nul 2>&1\n') # 현재 프로세스 종료 대기
+                f.write(f'timeout /t 1 /nobreak >nul\n')
+                f.write(f'move /y "{temp_file}" "{new_file}"\n') # 파일 교체
+                f.write(f'start "" "{new_file}"\n') # 새 버전 실행
+                f.write(f'del "%~f0"\n') # 자기 자신(bat) 삭제
+
+            subprocess.Popen([bat_path], shell=True)
+            QApplication.quit()
+        except Exception as e:
+            self.log_signal.emit(f"❌ 업데이트 실패: {str(e)}")
 
     def apply_hotkey_value(self, name, value):
         try:
@@ -236,16 +254,9 @@ class AionTriggerHelper(QMainWindow):
             self.update_ui_signal.emit(data); return True
         except: return False
 
-    def check_for_updates(self):
-        try:
-            r = requests.get(UPDATE_URL, timeout=3)
-            if r.status_code == 200 and r.json().get("version") > CURRENT_VERSION: self.log_signal.emit("📢 새 버전 감지")
-        except: pass
-
     def check_mouse_position(self):
         if not self.is_dragging:
             pos = self.mapFromGlobal(QCursor.pos())
-            # self.trans_box가 인스턴스 변수로 선언되어 에러가 해결됨
             enabled = not self.trans_box.geometry().contains(pos) and self.slider_alpha.value() < 230
             hwnd = int(self.winId()); style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT if enabled else style & ~WS_EX_TRANSPARENT)
@@ -295,11 +306,8 @@ class AionTriggerHelper(QMainWindow):
         if os.path.exists(CONFIG_PATH):
             try:
                 with open(CONFIG_PATH, "r") as f:
-                    d = json.load(f)
-                    self.controls["공격 모션"]["input"].setValue(d.get("attack", 0))
-                    self.controls["이동 속도"]["input"].setValue(d.get("speed", 0.0))
-                    self.hotkeys_data = d.get("hotkeys_data", self.hotkeys_data)
-                    self.check_100m.setChecked(d.get("check_100m", False)); self.slider_alpha.setValue(d.get("alpha", 255))
+                    d = json.load(f); self.controls["공격 모션"]["input"].setValue(d.get("attack", 0)); self.controls["이동 속도"]["input"].setValue(d.get("speed", 0.0))
+                    self.hotkeys_data = d.get("hotkeys_data", self.hotkeys_data); self.check_100m.setChecked(d.get("check_100m", False)); self.slider_alpha.setValue(d.get("alpha", 255))
             except: pass
 
     def toggle_always_on_top(self, s): self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint if s else self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint); self.show()
@@ -309,6 +317,10 @@ class AionTriggerHelper(QMainWindow):
         if procs:
             i, ok = QInputDialog.getItem(self, "선택", "대상 PID:", procs, 0, False)
             if ok and i: self.target_pid = int(i.split("PID: ")[1].replace(")", "")); self.is_connected = False
+
+    def open_hotkey_dialog(self, name):
+        dlg = HotkeySetDialog(name, self.hotkeys_data[name], (self.controls[name]["type"]=="int"))
+        if dlg.exec(): self.hotkeys_data[name] = dlg.hotkeys_list; self.append_log(f"✅ {name} 단축키 저장됨")
 
     @pyqtSlot(dict)
     def sync_ui(self, d):
